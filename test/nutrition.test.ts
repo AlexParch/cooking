@@ -44,3 +44,10 @@ describe("suggestRecipes", () => {
     expect(suggestRecipes(recipes, [], today, "breakfast").map((s) => s.recipe.id)).toEqual([3]);
   });
 });
+
+describe("detectCategories: фарш", () => {
+  it("куриный фарш — это птица, а не мясо", () => {
+    expect(detectCategories(["Куриный фарш"])).toEqual(["poultry"]);
+    expect(detectCategories(["Фарш говяжий"])).toEqual(["meat"]);
+  });
+});

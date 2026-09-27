@@ -100,18 +100,19 @@ export const categoryByKey = (key: string) => byKey.get(key);
 
 /** Грубое определение групп по названиям ингредиентов (запасной вариант без ИИ). */
 export function detectCategories(texts: string[]): string[] {
-  const hay = texts.join(" ").toLowerCase().replace(/ё/g, "е");
   const found = new Set<string>();
-  for (const c of CATEGORIES) {
-    for (const kw of c.keywords) {
-      const k = kw.toLowerCase().replace(/ё/g, "е");
-      // Короткие корни ищем с начала слова, чтобы «рис» не находился в «барбарисе».
-      const re = new RegExp(`(^|[^а-яa-z])${k}`, "i");
-      if (re.test(hay)) {
-        found.add(c.key);
-        break;
-      }
-    }
+  for (const text of texts) {
+    const hay = text.toLowerCase().replace(/ё/g, "е");
+    const here = CATEGORIES.filter((c) =>
+      c.keywords.some((kw) => {
+        const k = kw.toLowerCase().replace(/ё/g, "е");
+        // Короткие корни ищем с начала слова, чтобы «рис» не находился в «барбарисе».
+        return new RegExp(`(^|[^а-яa-z])${k}`, "i").test(hay);
+      }),
+    ).map((c) => c.key);
+    // «Куриный фарш», «рыбный фарш» — это птица/рыба, а не мясо.
+    const skipMeat = here.includes("meat") && (here.includes("poultry") || here.includes("fish"));
+    for (const k of here) if (!(k === "meat" && skipMeat)) found.add(k);
   }
   return [...found];
 }
@@ -179,6 +180,8 @@ export interface RecipeLite {
   title: string;
   meal_types: string[];
   categories: string[];
+  likes?: number;
+  dislikes?: number;
 }
 
 export interface Suggestion<R extends RecipeLite = RecipeLite> {
@@ -231,6 +234,13 @@ export function suggestRecipes<R extends RecipeLite>(
         reasons.push("ещё не готовили");
       }
       if (mealType && recipe.meal_types.includes(mealType)) score += 0.5;
+      // Оценки семьи: любимое предлагаем чаще, неудачное — реже.
+      const likes = recipe.likes ?? 0;
+      const dislikes = recipe.dislikes ?? 0;
+      if (likes || dislikes) {
+        score += Math.min(2, likes * 0.4) - dislikes * 1.2;
+        if (likes >= 3 && likes > dislikes * 2) reasons.push("❤️ семья любит");
+      }
       return { recipe, score, reasons };
     });
 

@@ -5,3 +5,4 @@ ALLOWED_USER_IDS=1
 ANTHROPIC_API_KEY=
 # Разрешает открывать WebApp в обычном браузере без Telegram (только локально!)
 DEV_AUTH=1
+OPENAI_API_KEY=

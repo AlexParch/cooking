@@ -29,4 +29,9 @@ ANTHROPIC_MODEL = "claude-opus-5"
 #   TELEGRAM_BOT_TOKEN  — токен от @BotFather
 #   WEBHOOK_SECRET      — любая случайная строка
 #   ALLOWED_USER_IDS    — Telegram ID членов семьи через запятую
-#   ANTHROPIC_API_KEY   — ключ Claude API (необязательно, но без него нет ИИ)
+#   ANTHROPIC_API_KEY   — ключ Claude API (рецепты, фото, ссылки, идеи)
+#   OPENAI_API_KEY      — ключ OpenAI (распознавание голосовых)
+
+# Раз в час проверяем, не пора ли отправить утреннее меню или вечерние напоминания.
+[triggers]
+crons = ["2 * * * *"]

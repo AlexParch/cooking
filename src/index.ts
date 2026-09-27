@@ -1,16 +1,19 @@
-import { aiEnabled, parseRecipe } from "./ai";
+import { aiEnabled, analyzePhoto, importFromUrl, parseRecipe, transcribe, voiceEnabled } from "./ai";
 import { handleUpdate, type Update } from "./bot";
-import { HttpError, Repo, type RecipeInput } from "./db";
+import { HttpError, Repo, type RecipeInput, type Settings } from "./db";
 import { allowedIds, today, type Env } from "./env";
+import { runReminders } from "./notify";
 import { addDays, CATEGORIES, MEAL_TYPES } from "./nutrition";
-import { getBalance, getIdea, getSuggestions } from "./service";
-import { Telegram, verifyInitData } from "./telegram";
+import { aisleFor, AISLE_ORDER } from "./planner";
+import { dayBrief, fillPlan, fromProducts, getBalance, getIdea, getSuggestions, shoppingFromPlan, swapPlan } from "./service";
+import { escapeHtml, Telegram, verifyInitData } from "./telegram";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8" } });
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (env.TELEGRAM_API_BASE) Telegram.base = env.TELEGRAM_API_BASE;
     const url = new URL(request.url);
     try {
       if (url.pathname === "/telegram/webhook" && request.method === "POST") return await webhook(request, env, url.origin);
@@ -22,6 +25,13 @@ export default {
       console.error(e);
       return json({ error: (e as Error).message ?? "Ошибка сервера" }, 500);
     }
+  },
+
+  // Раз в час: утреннее меню и вечерние напоминания/оценки.
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    if (env.TELEGRAM_API_BASE) Telegram.base = env.TELEGRAM_API_BASE;
+    const origin = await env.DB.prepare("SELECT value FROM settings WHERE key = 'app_origin'").first<string>("value");
+    ctx.waitUntil(runReminders(env, new Date(controller.scheduledTime), origin ?? "").then((s) => s.length && console.log("sent", s)));
   },
 } satisfies ExportedHandler<Env>;
 
@@ -37,7 +47,12 @@ async function webhook(request: Request, env: Env, origin: string): Promise<Resp
     // Всегда отвечаем 200, иначе Telegram будет бесконечно повторять.
     console.error("update failed", e);
   }
-  if (update.update_id % 50 === 0) await env.DB.prepare("DELETE FROM updates WHERE created_at < datetime('now', '-3 days')").run();
+  if (update.update_id % 50 === 0) {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM updates WHERE created_at < datetime('now', '-3 days')"),
+      env.DB.prepare("DELETE FROM sent WHERE created_at < datetime('now', '-7 days')"),
+    ]);
+  }
   return new Response("ok");
 }
 
@@ -52,16 +67,21 @@ async function setup(env: Env, url: URL): Promise<Response> {
   });
   await tg.call("setMyCommands", {
     commands: [
-      { command: "menu", description: "Что приготовить сейчас" },
-      { command: "idea", description: "Придумать новое блюдо" },
-      { command: "balance", description: "Баланс питания за неделю" },
-      { command: "today", description: "Что ели сегодня" },
-      { command: "help", description: "Как пользоваться" },
+      { command: "today", description: "🍽 Меню на сегодня" },
+      { command: "week", description: "🗓 Меню на неделю" },
+      { command: "shop", description: "🛒 Список покупок" },
+      { command: "idea", description: "✨ Придумать блюдо" },
+      { command: "menu", description: "🤔 Что приготовить сейчас" },
+      { command: "balance", description: "📊 Чего не хватает в питании" },
+      { command: "help", description: "❓ Как пользоваться" },
     ],
   });
   await tg.call("setChatMenuButton", { menu_button: { type: "web_app", text: "Кухня", web_app: { url: `${url.origin}/` } } });
+  await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('app_origin', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .bind(url.origin)
+    .run();
   const me = await tg.call<{ username: string }>("getMe");
-  return json({ ok: true, bot: `@${me.username}`, webhook: `${url.origin}/telegram/webhook`, ai: aiEnabled(env), allowed: [...allowedIds(env)] });
+  return json({ ok: true, bot: `@${me.username}`, webhook: `${url.origin}/telegram/webhook`, ai: aiEnabled(env), voice: voiceEnabled(env), allowed: [...allowedIds(env)] });
 }
 
 async function authUser(request: Request, env: Env): Promise<number> {
@@ -73,7 +93,18 @@ async function authUser(request: Request, env: Env): Promise<number> {
   return user.id;
 }
 
-const isDate = (s: string | null): s is string => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
+const isDate = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+const needAi = (env: Env) => {
+  if (!aiEnabled(env)) throw new HttpError(400, "ИИ не подключён (нет ANTHROPIC_API_KEY)");
+};
+
+async function fileFromForm(request: Request, field: string, maxMb: number): Promise<File> {
+  const form = await request.formData();
+  const file = form.get(field);
+  if (!file || typeof file === "string") throw new HttpError(400, "Файл не получен");
+  if (file.size > maxMb * 1024 * 1024) throw new HttpError(413, `Файл больше ${maxMb} МБ`);
+  return file;
+}
 
 async function api(request: Request, env: Env, url: URL): Promise<Response> {
   const userId = await authUser(request, env);
@@ -81,12 +112,34 @@ async function api(request: Request, env: Env, url: URL): Promise<Response> {
   const path = url.pathname.replace(/^\/api/, "");
   const method = request.method;
   const body = async <T>() => (await request.json()) as T;
-  const date = isDate(url.searchParams.get("date")) ? url.searchParams.get("date")! : today(env);
+  const q = (k: string) => url.searchParams.get(k);
+  const date = isDate(q("date")) ? q("date")! : today(env);
   let m: RegExpMatchArray | null;
 
-  if (path === "/config" && method === "GET")
-    return json({ userId, today: today(env), ai: aiEnabled(env), mealTypes: MEAL_TYPES, categories: CATEGORIES.map(({ keywords, ...c }) => c) });
+  // ---------- общее ----------
+  if (path === "/config" && method === "GET") {
+    const [settings, users] = await Promise.all([repo.getSettings(), repo.listUsers()]);
+    return json({
+      userId,
+      today: today(env),
+      ai: aiEnabled(env),
+      voice: voiceEnabled(env),
+      settings,
+      me: users.find((u) => u.id === userId) ?? null,
+      mealTypes: MEAL_TYPES,
+      aisles: AISLE_ORDER,
+      categories: CATEGORIES.map(({ keywords, ...c }) => c),
+    });
+  }
+  if (path === "/settings" && method === "PUT") return json(await repo.updateSettings(await body<Partial<Settings>>()));
+  if (path === "/me" && method === "PUT") {
+    const { notify } = await body<{ notify: boolean }>();
+    await repo.setUserNotify(userId, Boolean(notify));
+    return json({ ok: true });
+  }
+  if (path === "/brief" && method === "GET") return json(await dayBrief(env, date));
 
+  // ---------- рецепты ----------
   if (path === "/recipes" && method === "GET") return json(await repo.listRecipes());
   if (path === "/recipes" && method === "POST") return json(await repo.createRecipe(await body<RecipeInput>(), userId), 201);
   if ((m = path.match(/^\/recipes\/(\d+)$/))) {
@@ -99,29 +152,128 @@ async function api(request: Request, env: Env, url: URL): Promise<Response> {
     if (method === "DELETE") return await repo.deleteRecipe(id), json({ ok: true });
   }
   if (path === "/recipes/parse" && method === "POST") {
-    const { text } = await body<{ text: string }>();
+    const { text, source } = await body<{ text: string; source?: string }>();
     if (!text?.trim()) throw new HttpError(400, "Пустой текст");
-    if (!aiEnabled(env)) throw new HttpError(400, "ИИ не подключён (нет ANTHROPIC_API_KEY)");
-    return json(await parseRecipe(env, text, "text"));
+    needAi(env);
+    return json(await parseRecipe(env, text, source === "voice" ? "voice" : "text"));
+  }
+  if (path === "/recipes/import" && method === "POST") {
+    const { url: link } = await body<{ url: string }>();
+    needAi(env);
+    try {
+      return json(await importFromUrl(env, String(link ?? "").trim()));
+    } catch (e) {
+      throw new HttpError(400, (e as Error).message);
+    }
   }
 
+  // ---------- голос и фото ----------
+  if (path === "/transcribe" && method === "POST") {
+    if (!voiceEnabled(env)) throw new HttpError(400, "Распознавание голоса не подключено");
+    const file = await fileFromForm(request, "audio", 25);
+    const text = await transcribe(env, await file.arrayBuffer(), file.name || "voice.webm", file.type || "audio/webm");
+    return json({ text });
+  }
+  if (path === "/photo" && method === "POST") {
+    needAi(env);
+    const file = await fileFromForm(request, "image", 10);
+    const result = await analyzePhoto(env, await file.arrayBuffer(), file.type || "image/jpeg");
+    if (result.kind === "recipe" && result.recipe_text.trim()) return json({ kind: "recipe", recipe: await parseRecipe(env, result.recipe_text, "photo") });
+    if (result.kind === "products" && result.products.length) return json({ kind: "products", products: result.products, matches: await fromProducts(env, result.products) });
+    return json({ kind: "other", comment: result.comment });
+  }
+  if (path === "/products" && method === "POST") {
+    const { products } = await body<{ products: string[] }>();
+    const list = (products ?? []).map(String).map((s) => s.trim()).filter(Boolean);
+    return json({ products: list, matches: await fromProducts(env, list) });
+  }
+
+  // ---------- что ели ----------
   if (path === "/meals" && method === "GET") {
-    const from = isDate(url.searchParams.get("from")) ? url.searchParams.get("from")! : addDays(date, -6);
-    const to = isDate(url.searchParams.get("to")) ? url.searchParams.get("to")! : date;
+    const from = isDate(q("from")) ? q("from")! : addDays(date, -6);
+    const to = isDate(q("to")) ? q("to")! : date;
     return json(await repo.listMeals(from, to));
   }
-  if (path === "/meals" && method === "POST") return json(await repo.addMeal(await body(), userId), 201);
+  if (path === "/meals" && method === "POST") {
+    const input = await body<{ date: string; meal_type: string; recipe_id?: number; title?: string; categories?: string[]; leftovers?: boolean }>();
+    const meal = await repo.addMeal(input, userId);
+    // «Приготовила с запасом» — ставим это же блюдо на завтра как «доедаем».
+    if (input.leftovers) await repo.setPlan({ date: addDays(meal.date, 1), meal_type: meal.meal_type, recipe_id: meal.recipe_id, title: meal.title, leftovers: true });
+    return json(meal, 201);
+  }
   if ((m = path.match(/^\/meals\/(\d+)$/)) && method === "DELETE") return await repo.deleteMeal(Number(m[1])), json({ ok: true });
+  if ((m = path.match(/^\/meals\/(\d+)\/rate$/)) && method === "POST") {
+    const { rating } = await body<{ rating: number }>();
+    return json(await repo.rateMeal(Number(m[1]), Number(rating)));
+  }
 
+  // ---------- меню ----------
+  if (path === "/plan" && method === "GET") {
+    const from = isDate(q("from")) ? q("from")! : date;
+    const to = isDate(q("to")) ? q("to")! : addDays(from, 6);
+    return json(await repo.listPlan(from, to));
+  }
+  if (path === "/plan" && method === "PUT") return json(await repo.setPlan(await body()));
+  if ((m = path.match(/^\/plan\/(\d+)$/)) && method === "DELETE") return await repo.deletePlan(Number(m[1])), json({ ok: true });
+  if (path === "/plan/fill" && method === "POST") {
+    const { start, days, replace } = await body<{ start?: string; days?: number; replace?: boolean }>();
+    const d = Math.min(14, Math.max(1, Number(days) || 7));
+    return json(await fillPlan(env, isDate(start) ? start : date, d, Boolean(replace)));
+  }
+  if (path === "/plan/swap" && method === "POST") {
+    const { date: d, meal_type } = await body<{ date: string; meal_type: string }>();
+    if (!isDate(d)) throw new HttpError(400, "Неверная дата");
+    const item = await swapPlan(env, d, meal_type);
+    if (!item) throw new HttpError(404, "Нет других подходящих рецептов — добавьте ещё рецептов в книгу");
+    return json(item);
+  }
+
+  // ---------- покупки ----------
+  if (path === "/shopping" && method === "GET") return json(await repo.listShopping());
+  if (path === "/shopping" && method === "POST") {
+    const { name, amount } = await body<{ name: string; amount?: string }>();
+    await repo.addShopping([{ name, amount, aisle: aisleFor(name) }]);
+    return json(await repo.listShopping(), 201);
+  }
+  if ((m = path.match(/^\/shopping\/(\d+)$/))) {
+    if (method === "PATCH") return await repo.updateShopping(Number(m[1]), await body()), json({ ok: true });
+    if (method === "DELETE") return await repo.deleteShopping(Number(m[1])), json({ ok: true });
+  }
+  if (path === "/shopping/from-plan" && method === "POST") {
+    const { from, to } = await body<{ from?: string; to?: string }>();
+    const f = isDate(from) ? from : date;
+    return json(await shoppingFromPlan(env, f, isDate(to) ? to : addDays(f, 6)));
+  }
+  if (path === "/shopping/clear" && method === "POST") {
+    const { what } = await body<{ what: "checked" | "all" }>();
+    await repo.clearShopping(what === "all" ? "all" : "checked");
+    return json({ ok: true });
+  }
+  if (path === "/shopping/send" && method === "POST") {
+    // Отправить список в чат — удобно переслать мужу.
+    const items = (await repo.listShopping()).filter((i) => !i.checked);
+    if (!items.length) throw new HttpError(400, "Список пуст");
+    const lines = ["🛒 <b>Список покупок</b>"];
+    for (const aisle of AISLE_ORDER) {
+      const group = items.filter((i) => i.aisle === aisle);
+      if (!group.length) continue;
+      lines.push("", `<b>${aisle}</b>`, ...group.map((i) => `▫️ ${escapeHtml(i.name)}${i.amount ? ` — ${escapeHtml(i.amount)}` : ""}`));
+    }
+    const me = (await repo.listUsers()).find((u) => u.id === userId);
+    await new Telegram(env.TELEGRAM_BOT_TOKEN).send(me?.chat_id ?? userId, lines.join("\n").slice(0, 4000));
+    return json({ ok: true });
+  }
+
+  // ---------- подсказки ----------
   if (path === "/balance" && method === "GET") {
-    const days = Math.min(60, Math.max(1, Number(url.searchParams.get("days")) || 7));
+    const days = Math.min(60, Math.max(1, Number(q("days")) || 7));
     return json(await getBalance(env, days, date));
   }
-  if (path === "/suggest" && method === "GET") return json(await getSuggestions(env, url.searchParams.get("meal") ?? undefined, date, 8));
+  if (path === "/suggest" && method === "GET") return json(await getSuggestions(env, q("meal") || undefined, date, 8));
   if (path === "/idea" && method === "POST") {
-    if (!aiEnabled(env)) throw new HttpError(400, "ИИ не подключён (нет ANTHROPIC_API_KEY)");
-    const { meal, wish } = await body<{ meal?: string; wish?: string }>();
-    return json(await getIdea(env, meal || undefined, wish || undefined));
+    needAi(env);
+    const { meal, wish, products } = await body<{ meal?: string; wish?: string; products?: string[] }>();
+    return json(await getIdea(env, meal || undefined, wish || undefined, products?.length ? products : undefined));
   }
 
   return json({ error: "Not found" }, 404);

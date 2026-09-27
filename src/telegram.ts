@@ -7,10 +7,15 @@ export interface TgUser {
 }
 
 export class Telegram {
-  constructor(private token: string) {}
+  /** `base` можно поменять для тестов или своего Bot API сервера. */
+  constructor(
+    private token: string,
+    private base = Telegram.base,
+  ) {}
+  static base = "https://api.telegram.org";
 
   async call<T = unknown>(method: string, body: Record<string, unknown> = {}): Promise<T> {
-    const res = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
+    const res = await fetch(`${this.base}/bot${this.token}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -30,7 +35,7 @@ export class Telegram {
 
   async downloadFile(fileId: string): Promise<ArrayBuffer> {
     const file = await this.call<{ file_path: string }>("getFile", { file_id: fileId });
-    const res = await fetch(`https://api.telegram.org/file/bot${this.token}/${file.file_path}`);
+    const res = await fetch(`${this.base}/file/bot${this.token}/${file.file_path}`);
     if (!res.ok) throw new Error(`Не удалось скачать файл: ${res.status}`);
     return res.arrayBuffer();
   }

@@ -45,6 +45,7 @@ jobs:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           ALLOWED_USER_IDS: ${{ secrets.ALLOWED_USER_IDS }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: node scripts/secrets.mjs > secrets.json && npx wrangler secret bulk secrets.json && rm secrets.json
       - name: Подключение бота к Telegram
         env:

@@ -1,5 +1,5 @@
 // Собирает непустые секреты из переменных окружения в JSON для `wrangler secret bulk`.
-const names = ["TELEGRAM_BOT_TOKEN", "WEBHOOK_SECRET", "ALLOWED_USER_IDS", "ANTHROPIC_API_KEY"];
+const names = ["TELEGRAM_BOT_TOKEN", "WEBHOOK_SECRET", "ALLOWED_USER_IDS", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"];
 const out = Object.fromEntries(names.filter((n) => process.env[n]).map((n) => [n, process.env[n]]));
 for (const required of names.slice(0, 3)) {
   if (!out[required]) {

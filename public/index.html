@@ -10,13 +10,16 @@
 <body>
   <main id="view"></main>
   <nav class="tabs">
-    <button data-tab="today"><span>🍽</span>Сегодня</button>
+    <button data-tab="home"><span>🏠</span>Главная</button>
+    <button data-tab="week"><span>🗓</span>Меню</button>
     <button data-tab="recipes"><span>📖</span>Рецепты</button>
-    <button data-tab="balance"><span>📊</span>Баланс</button>
-    <button data-tab="ideas"><span>✨</span>Идеи</button>
+    <button data-tab="shop"><span>🛒</span>Покупки</button>
+    <button data-tab="more"><span>☰</span>Ещё</button>
   </nav>
   <div id="sheet" class="sheet hidden"><div class="sheet-body" id="sheet-body"></div></div>
+  <div id="cook-overlay" class="overlay cook hidden"></div>
+  <div id="onboard" class="overlay onboard hidden"></div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js"></script>
+  <script type="module" src="/js/app.js"></script>
 </body>
 </html>
