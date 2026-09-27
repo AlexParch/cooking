@@ -7,7 +7,9 @@
     "deploy": "wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply cooking --local",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:server": "esbuild server/main.js --bundle --platform=node --format=esm --target=node22 --outfile=dist/server.mjs --log-level=warning --banner:js=\"import{createRequire}from'node:module';const require=createRequire(import.meta.url);\"",
+    "start": "node --disable-warning=ExperimentalWarning dist/server.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",
@@ -15,6 +17,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260927.1",
+    "esbuild": "^0.28.2",
     "typescript": "^5.9.3",
     "vitest": "^5.0.2",
     "wrangler": "^4.141.0"

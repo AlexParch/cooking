@@ -1,0 +1,81 @@
+# Выкладка на свой сервер по SSH: при каждом изменении в main (или вручную).
+# Нужные секреты — в README, раздел «Запуск на своём сервере».
+name: Deploy to server
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency: deploy-server
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER || 'root' }}
+      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+      APP_DIR: ${{ secrets.APP_DIR || 'cooking' }}
+    steps:
+      - name: Настроен ли сервер
+        id: gate
+        run: |
+          if [ -z "$SSH_HOST" ]; then
+            echo "::notice::Секрет SSH_HOST не задан — выкладка на сервер пропущена"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.enabled == 'true'
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.enabled == 'true'
+        with: { node-version: 22, cache: npm }
+      - name: Тесты
+        if: steps.gate.outputs.enabled == 'true'
+        run: npm ci && npm run typecheck && npm test
+
+      - name: Файл настроек .env
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          DOMAIN: ${{ secrets.DOMAIN }}
+          USE_CADDY: ${{ secrets.USE_CADDY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          ALLOWED_USER_IDS: ${{ secrets.ALLOWED_USER_IDS }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
+        run: node scripts/make-env.mjs > "$RUNNER_TEMP/app.env"
+
+      - name: Подключение по SSH
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          cat > ~/.ssh/config <<CFG
+          Host server
+            HostName $SSH_HOST
+            User $SSH_USER
+            Port $SSH_PORT
+            IdentityFile ~/.ssh/deploy_key
+            ServerAliveInterval 30
+          CFG
+          ssh server 'echo "SSH OK: $(hostname)"'
+
+      - name: Загрузка кода на сервер
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          tar czf - --exclude=.git --exclude=node_modules --exclude=data --exclude=dist --exclude=.wrangler . \
+            | ssh server "mkdir -p '$APP_DIR' && tar xzf - -C '$APP_DIR'"
+          ssh server "umask 077 && cat > '$APP_DIR/.env'" < "$RUNNER_TEMP/app.env"
+
+      - name: Запуск
+        if: steps.gate.outputs.enabled == 'true'
+        run: ssh server "bash '$APP_DIR/scripts/server-deploy.sh'"

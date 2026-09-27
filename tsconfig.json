@@ -19,5 +19,8 @@
     "src",
     "test",
     "public/js/amounts.js"
+  ],
+  "exclude": [
+    "test/d1.test.ts"
   ]
 }

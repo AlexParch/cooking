@@ -4,6 +4,11 @@
 
 ## Что умеет
 
+**Первый запуск — пошаговый мастер:** сколько человек в семье → жена надиктовывает свои рецепты
+(или берёт из 18 готовых ПП-рецептов) → бот составляет первую неделю → по списку продуктов она
+отмечает, что уже есть дома (нажатием или голосом: «гречка, яйца, морковь») → остаётся список
+«докупить», который одной кнопкой уходит всей семье в Telegram.
+
 **В приложении (кнопка «Кухня» в боте)** — сделано для неопытного пользователя: большие кнопки,
 подсказки на каждом экране, знакомство при первом входе.
 
@@ -33,59 +38,96 @@
 ## Как это устроено
 
 ```
-Telegram ──webhook──▶ Cloudflare Worker (src/) ──▶ D1 (SQLite): рецепты, приёмы пищи
+Telegram ──webhook──▶ приложение (src/) ──▶ SQLite: рецепты, меню, покупки
                          │   ├─ OpenAI: голос → текст
                          │   └─ Claude API: рецепты, фото, ссылки, идеи
-WebApp (public/) ◀───────┘   статика с того же адреса, API /api/*
-Cron (раз в час) ──▶ утреннее меню и вечерние напоминания
+WebApp (public/) ◀───────┘   с того же адреса, API /api/*
+Таймер (раз в час) ──▶ утреннее меню и вечерние напоминания
 ```
+
+Один и тот же код работает в двух вариантах:
+- **свой сервер** — Docker: Node.js + файл SQLite + Caddy (HTTPS) — `server/`, `Dockerfile`, `docker-compose.yml`;
+- **Cloudflare Workers** — бесплатный облачный вариант (D1 вместо SQLite-файла) — `wrangler.toml`.
 
 - `src/bot.ts` — команды и сообщения бота
 - `src/index.ts` — роутинг, API для WebApp, проверка подписи Telegram
 - `src/nutrition.ts` — группы продуктов, недельные ориентиры, алгоритм подсказок (**здесь можно менять цели**)
-- `src/planner.ts` — меню на неделю, список покупок, подготовка заранее, «из того, что есть»
+- `src/planner.ts` — меню на неделю, список покупок, подготовка заранее, «что есть дома»
 - `src/notify.ts` — утренние и вечерние сообщения
+- `src/starter.ts` — готовые ПП-рецепты для быстрого старта
 - `src/ai.ts` — голос (OpenAI) и Claude
-- `public/js/` — WebApp без сборки (ES-модули), `public/js/amounts.js` — пересчёт порций (общий с сервером)
+- `server/` — запуск на своём сервере (SQLite вместо D1, статика, таймер, бэкапы)
+- `public/js/` — WebApp без сборки (ES-модули)
 
-## Где это работает? (не нужно держать компьютер включённым)
+## Запуск на своём сервере
 
-Бот живёт в **Cloudflare Workers** — бесплатно, 24/7. Код лежит в GitHub, и при каждом пуше в `main`
-GitHub Actions сам тестирует и выкладывает новую версию. Скачивать репозиторий на компьютер не нужно.
+Код лежит на GitHub. При каждом изменении в `main` GitHub Actions сам заливает его на сервер по SSH
+и перезапускает. На сервере руками ничего делать не нужно, даже Docker ставится сам.
 
-## Первый запуск (≈15 минут, один раз)
+### Что нужно
+
+- **Сервер** на Ubuntu/Debian, от 1 ГБ памяти, открыты порты **80 и 443**.
+- **Домен не обязателен.** Без него адрес будет вида `https://203.0.113.10.sslip.io`
+  (бесплатный сервис, который указывает на IP сервера). HTTPS-сертификат Caddy получит сам.
+- ⚠️ **Если сервер в России:** OpenAI и Anthropic не отвечают на российские IP. Нужен сервер
+  за рубежом или прокси: секрет `HTTPS_PROXY` (`http://user:pass@host:port`).
+
+### Шаги (≈15 минут, один раз)
 
 1. **Бот.** В Telegram откройте [@BotFather](https://t.me/BotFather) → `/newbot` → сохраните токен.
-2. **Ваши ID.** Напишите [@userinfobot](https://t.me/userinfobot) с обоих телефонов — он покажет числовой ID.
-   (Или позже: бот сам ответит незнакомцу его ID.)
-3. **Cloudflare.** Зарегистрируйтесь на [dash.cloudflare.com](https://dash.cloudflare.com) (бесплатно).
-   - *Account ID*: на главной странице Workers & Pages справа.
-   - *API Token*: My Profile → API Tokens → Create Token → шаблон **Edit Cloudflare Workers**,
-     и добавьте в него право **Account → D1 → Edit**.
-4. **Ключи ИИ:**
-   - Claude API — [console.anthropic.com](https://console.anthropic.com): оформление рецептов, фото, ссылки, идеи.
-   - OpenAI API — [platform.openai.com](https://platform.openai.com/api-keys): распознавание голосовых.
+2. **Telegram ID.** Напишите [@userinfobot](https://t.me/userinfobot) с обоих телефонов.
+3. **Ключи ИИ:**
+   - Claude: [console.anthropic.com](https://console.anthropic.com) — оформление рецептов, фото, ссылки, идеи;
+   - OpenAI: [platform.openai.com/api-keys](https://platform.openai.com/api-keys) — распознавание голоса.
+4. **SSH-ключ для GitHub.** На своём компьютере:
+   ```bash
+   ssh-keygen -t ed25519 -f cooking_deploy -N ""
+   ssh-copy-id -i cooking_deploy.pub root@АДРЕС_СЕРВЕРА
+   ```
+   Содержимое файла `cooking_deploy` (закрытый ключ) понадобится на следующем шаге.
 5. **Секреты в GitHub:** репозиторий → Settings → Secrets and variables → Actions → New repository secret:
 
    | Имя | Значение |
    |---|---|
-   | `CLOUDFLARE_API_TOKEN` | токен из п.3 |
-   | `CLOUDFLARE_ACCOUNT_ID` | Account ID из п.3 |
+   | `SSH_HOST` | IP или домен сервера |
+   | `SSH_KEY` | содержимое файла `cooking_deploy` целиком |
+   | `SSH_USER` | пользователь (по умолчанию `root`); если не root — нужен `sudo` без пароля |
+   | `SSH_PORT` | порт SSH, если не 22 |
+   | `DOMAIN` | *(необязательно)* свой домен, уже направленный на сервер, напр. `kitchen.example.ru` |
+   | `USE_CADDY` | *(необязательно)* `false`, если на сервере уже есть nginx на 80/443 (тогда проксируйте домен на `127.0.0.1:8080`) |
    | `TELEGRAM_BOT_TOKEN` | токен из п.1 |
    | `WEBHOOK_SECRET` | любая строка из латиницы/цифр, напр. `kitchen_2026_x7f3k` |
    | `ALLOWED_USER_IDS` | ID через запятую: `111111,222222` |
-   | `ANTHROPIC_API_KEY` | ключ Claude из п.4 |
-   | `OPENAI_API_KEY` | ключ OpenAI из п.4 |
+   | `ANTHROPIC_API_KEY` | ключ Claude |
+   | `OPENAI_API_KEY` | ключ OpenAI |
+   | `HTTPS_PROXY` | *(только если сервер в России)* прокси за рубежом |
 
-6. **Запуск:** слейте ветку в `main` (или Actions → *Test & Deploy* → *Run workflow*).
-   Workflow сам создаст базу, применит миграции, выложит код, пропишет секреты и подключит webhook.
-   В логе шага «Подключение бота» будет адрес вида `https://cooking.<ваш-поддомен>.workers.dev`.
-7. Откройте бота в Telegram → `/start`. 🎉
+6. **Запуск:** слейте ветку в `main` или откройте Actions → *Deploy to server* → *Run workflow*.
+   В логе последнего шага будет «✅ Приложение работает: https://…».
+7. Жена открывает бота → `/start` → **«🚀 Начать настройку»**.
+
+### Полезное на сервере
+
+```bash
+cd ~/cooking
+docker compose logs -f app        # что происходит
+docker compose restart app        # перезапуск
+ls data/backups/                  # ночные бэкапы базы (хранятся 14 дней)
+```
+
+База — один файл `~/cooking/data/cooking.db`. Чтобы перенести на другой сервер, достаточно скопировать папку `data/`.
+
+**Без GitHub Actions** (руками): `git clone` репозитория на сервер → `cp .env.example .env` →
+заполнить → `bash scripts/server-deploy.sh`.
+
+### Альтернатива: Cloudflare Workers
+
+Бесплатно и без своего сервера: секреты `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` + те же секреты бота,
+затем Actions → *Deploy to Cloudflare* → *Run workflow*.
 
 ## Стоимость
 
-- Cloudflare Workers / D1 / Workers AI — бесплатного тарифа хватает семье с запасом.
-  Если Cloudflare начнёт жаловаться на лимит CPU (редко, при длинных голосовых), тариф Workers Paid — $5/мес.
+- Свой сервер — уже есть. Приложению хватает ~100 МБ памяти.
 - Claude API: разбор одного рецепта, фото или одна идея — порядка нескольких центов.
   Модель задаётся в `wrangler.toml` (`ANTHROPIC_MODEL`).
 - OpenAI: минута голосового — меньше цента.
@@ -94,13 +136,11 @@ GitHub Actions сам тестирует и выкладывает новую в
 
 ```bash
 npm install
-cp .dev.vars.example .dev.vars     # DEV_AUTH=1 — открывать WebApp в браузере без Telegram
-npx wrangler d1 migrations apply cooking --local
-npx wrangler dev                    # http://localhost:8787
-npm test                            # тесты
+npm test                                        # тесты
+npm run build:server && DEV_AUTH=1 ALLOWED_USER_IDS=1 npm start   # http://localhost:8080
 ```
 
-Для голосовых (Workers AI) локально нужен вход в Cloudflare (`npx wrangler login`).
+`DEV_AUTH=1` — открывать WebApp в обычном браузере без Telegram (только для разработки!).
 
 ## Идеи на следующие шаги
 

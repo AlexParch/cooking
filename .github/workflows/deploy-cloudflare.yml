@@ -1,8 +1,7 @@
-name: Test & Deploy
+# Альтернатива своему серверу: выкладка в Cloudflare Workers. Запускается только вручную.
+name: Deploy to Cloudflare
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -17,8 +16,6 @@ jobs:
       - run: npm test
 
   deploy:
-    # Выкладываем только из main (или вручную: Actions → Test & Deploy → Run workflow)
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     needs: test
     runs-on: ubuntu-latest
     concurrency: deploy
