@@ -51,3 +51,27 @@ describe("detectCategories: фарш", () => {
     expect(detectCategories(["Фарш говяжий"])).toEqual(["meat"]);
   });
 });
+
+describe("баланс по членам семьи", () => {
+  const today = "2026-09-27";
+  const members = [
+    { id: 1, name: "Мама", emoji: "👩" },
+    { id: 2, name: "Миша", emoji: "👦" },
+  ];
+  it("общие блюда засчитываются всем, личные — только тем, кто ел", async () => {
+    const { computeFamilyBalance, worstBalance } = await import("../src/nutrition");
+    const meals = [
+      { ...meal(today, ["poultry"]), eaters: [1] }, // мама — курица
+      { ...meal(today, ["fish"]), eaters: [2] }, // Миша — пельмени с рыбой
+      { ...meal(today, ["eggs"], null, "breakfast"), eaters: null }, // омлет — все
+    ];
+    const fam = computeFamilyBalance(meals, members, today, 7);
+    const get = (i: number, key: string) => fam[i].balance.find((b) => b.key === key)!.count;
+    expect([get(0, "poultry"), get(0, "fish"), get(0, "eggs")]).toEqual([1, 0, 1]);
+    expect([get(1, "poultry"), get(1, "fish"), get(1, "eggs")]).toEqual([0, 1, 1]);
+    // Для подсказок берём худшего: рыбу ела не вся семья — значит, «не было» у кого-то.
+    const worst = Object.fromEntries(worstBalance(fam).map((b) => [b.key, b]));
+    expect(worst.fish.count).toBe(0);
+    expect(worst.eggs.count).toBe(1);
+  });
+});

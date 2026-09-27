@@ -122,6 +122,37 @@ export interface MealRecord {
   meal_type: string;
   recipe_id: number | null;
   categories: string[];
+  /** Кто ел (id членов семьи). null/пусто — вся семья. */
+  eaters?: number[] | null;
+}
+
+/** Что ел конкретный человек: его блюда плюс общие «для всей семьи». */
+export const mealsOf = <M extends MealRecord>(meals: M[], memberId: number): M[] =>
+  meals.filter((m) => !m.eaters?.length || m.eaters.includes(memberId));
+
+export interface MemberLite {
+  id: number;
+  name: string;
+  emoji: string;
+}
+
+/** Баланс по каждому члену семьи. */
+export function computeFamilyBalance<T extends MemberLite>(meals: MealRecord[], members: T[], today: string, days = 7) {
+  return members.map((member) => ({ member, balance: computeBalance(mealsOf(meals, member.id), today, days) }));
+}
+
+/**
+ * Общий баланс семьи для подсказок: если кто-то недоел рыбы — рыбы «мало», даже если родители ели.
+ * Берём по каждой группе худший результат среди членов семьи.
+ */
+export function worstBalance(perMember: { balance: CategoryBalance[] }[]): CategoryBalance[] {
+  if (!perMember.length) return [];
+  return perMember[0].balance.map((b, i) => {
+    const all = perMember.map((p) => p.balance[i]);
+    const worst = all.reduce((a, x) => (x.count < a.count ? x : a));
+    const since = all.map((x) => x.daysSince);
+    return { ...worst, daysSince: since.includes(null) ? null : Math.max(...(since as number[])) };
+  });
 }
 
 export interface CategoryBalance {
@@ -197,8 +228,9 @@ export function suggestRecipes<R extends RecipeLite>(
   today: string,
   mealType?: string,
   limit = 5,
+  familyBalance?: CategoryBalance[],
 ): Suggestion<R>[] {
-  const balance = new Map(computeBalance(meals, today, 7).map((b) => [b.key, b]));
+  const balance = new Map((familyBalance ?? computeBalance(meals, today, 7)).map((b) => [b.key, b]));
   const lastCooked = new Map<number, string>();
   for (const m of meals) {
     if (m.recipe_id == null) continue;

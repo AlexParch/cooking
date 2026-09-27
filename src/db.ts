@@ -43,6 +43,14 @@ export interface Meal extends MealRecord {
   created_at: string;
 }
 
+export interface Member {
+  id: number;
+  name: string;
+  emoji: string;
+  kind: "adult" | "child";
+  sort: number;
+}
+
 export interface PlanItem {
   id: number;
   date: string;
@@ -123,6 +131,7 @@ function rowToMeal(r: Record<string, unknown>): Meal {
     recipe_id: num(r.recipe_id),
     title: r.title as string,
     categories: parse(r.categories, []),
+    eaters: r.eaters ? parse<number[]>(r.eaters, []) : null,
     rating: num(r.rating),
     created_by: num(r.created_by),
     created_at: r.created_at as string,
@@ -260,7 +269,7 @@ export class Repo {
   }
 
   async addMeal(
-    input: { date: string; meal_type: string; recipe_id?: number | null; title?: string; categories?: string[] },
+    input: { date: string; meal_type: string; recipe_id?: number | null; title?: string; categories?: string[]; eaters?: number[] | null },
     userId: number | null,
   ): Promise<Meal> {
     checkSlot(input.date, input.meal_type);
@@ -276,9 +285,16 @@ export class Repo {
     }
     if (!title) throw new HttpError(400, "Укажите блюдо");
     if (categories.length === 0) categories = detectCategories([title]);
+    // Кто ел: только существующие члены семьи; «все» храним как NULL.
+    let eaters: number[] | null = null;
+    if (Array.isArray(input.eaters) && input.eaters.length) {
+      const members = await this.listMembers();
+      const ids = [...new Set(input.eaters.map(Number))].filter((id) => members.some((m) => m.id === id));
+      eaters = ids.length && ids.length < members.length ? ids : null;
+    }
     const row = await this.db
-      .prepare("INSERT INTO meals (date, meal_type, recipe_id, title, categories, created_by) VALUES (?, ?, ?, ?, ?, ?) RETURNING *")
-      .bind(input.date, input.meal_type, recipeId, title.slice(0, 200), json(categories), userId)
+      .prepare("INSERT INTO meals (date, meal_type, recipe_id, title, categories, eaters, created_by) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *")
+      .bind(input.date, input.meal_type, recipeId, title.slice(0, 200), json(categories), eaters ? json(eaters) : null, userId)
       .first();
     return rowToMeal(row!);
   }
@@ -307,6 +323,49 @@ export class Repo {
       )
       .bind(recipeId)
       .run();
+  }
+
+  // ---------- члены семьи ----------
+  async listMembers(): Promise<Member[]> {
+    const { results } = await this.db.prepare("SELECT * FROM members ORDER BY sort, id").all();
+    return results.map((r) => ({
+      id: r.id as number,
+      name: r.name as string,
+      emoji: r.emoji as string,
+      kind: (r.kind as string) === "child" ? "child" : "adult",
+      sort: Number(r.sort ?? 0),
+    }));
+  }
+
+  async saveMember(input: { id?: number; name?: string; emoji?: string; kind?: string }): Promise<Member[]> {
+    const name = String(input.name ?? "").trim().slice(0, 40);
+    const emoji = String(input.emoji ?? "").trim().slice(0, 8) || "🙂";
+    const kind = input.kind === "child" ? "child" : "adult";
+    if (input.id) {
+      if (!name) throw new HttpError(400, "Напишите имя");
+      await this.db.prepare("UPDATE members SET name = ?, emoji = ?, kind = ? WHERE id = ?").bind(name, emoji, kind, input.id).run();
+    } else {
+      const count = (await this.listMembers()).length;
+      if (count >= 12) throw new HttpError(400, "Слишком много членов семьи");
+      await this.db
+        .prepare("INSERT INTO members (name, emoji, kind, sort) VALUES (?, ?, ?, ?)")
+        .bind(name || (kind === "child" ? "Ребёнок" : "Взрослый"), emoji, kind, count)
+        .run();
+    }
+    await this.syncFamilySize();
+    return this.listMembers();
+  }
+
+  async deleteMember(id: number): Promise<Member[]> {
+    await this.db.prepare("DELETE FROM members WHERE id = ?").bind(id).run();
+    await this.syncFamilySize();
+    return this.listMembers();
+  }
+
+  /** Порций готовим на столько, сколько людей в семье. */
+  private async syncFamilySize() {
+    const n = (await this.listMembers()).length;
+    if (n) await this.updateSettings({ family_size: n });
   }
 
   // ---------- меню ----------

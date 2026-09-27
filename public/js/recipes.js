@@ -4,6 +4,7 @@ import {
   $, $$, api, backHandlers, bus, busy, cat, catEmojis, catOptions, chips, chipValues, closeSheet, confirmDialog, esc, guard, haptic, hint,
   loadRecipes, MEAL_ICONS, MEAL_ORDER, mealName, mealOptions, openSheet, prettyDate, recipeById, replaceSheet, sheetHead, state, tg, toast, addDays,
 } from "./ui.js";
+import { hasFamily, members, whoAteHtml, whoAteValue } from "./members.js";
 
 const filter = { q: "", meal: "" };
 
@@ -147,15 +148,25 @@ export function shortDay(d) {
  * Шторка «Что ели?». Если передан recipe — сразу спрашиваем только приём пищи.
  * Иначе (с главной) — выбор блюда для конкретного приёма пищи.
  */
-export async function openMarkEaten({ date, mealType = null, recipe = null, planned = null }) {
+/**
+ * Отметить «съели».
+ * - recipe: из карточки рецепта — спрашиваем приём пищи и кто ел;
+ * - planned: блюдо из меню — подтверждение «кто ел» (или «ели другое»);
+ * - иначе: выбор блюда для приёма пищи.
+ * whoDefault — кого отметить заранее (например, тех, кто ещё не ел в этот приём).
+ */
+export async function openMarkEaten({ date, mealType = null, recipe = null, planned = null, picker = false, whoDefault = null }) {
   const leftoversOk = (mt) => mt === "lunch" || mt === "dinner";
   const save = (payload, mt) =>
     guard(async () => {
-      const leftovers = $("#leftovers")?.checked;
-      await api("/meals", { method: "POST", body: { date, meal_type: mt, ...payload, leftovers } });
+      const root = $("#sheet-body");
+      const eaters = whoAteValue(root);
+      const leftovers = $("#leftovers", root)?.checked;
+      await api("/meals", { method: "POST", body: { date, meal_type: mt, ...payload, leftovers, eaters } });
       haptic();
       closeSheet();
-      toast(leftovers ? "Отмечено! Завтра в меню — доедаем 🍲" : "Отмечено ✅ Приятного аппетита!");
+      const partial = eaters && hasFamily() && eaters.length < members().length;
+      toast(leftovers ? "Отмечено! Завтра в меню — доедаем 🍲" : partial ? "Отмечено ✅ Остальные ели другое? Нажмите «＋ другое блюдо»" : "Отмечено ✅ Приятного аппетита!", 4000);
       bus.render();
     });
 
@@ -171,6 +182,7 @@ export async function openMarkEaten({ date, mealType = null, recipe = null, plan
        <p class="muted">${esc(prettyDate(date))}</p>
        <h3>Какой это был приём пищи?</h3>
        ${chips(mealOptions(), [guess], "mt", true)}
+       ${whoAteHtml(whoDefault)}
        <label class="check-row"><input type="checkbox" id="leftovers" /> <span>🍲 Приготовила с запасом — <b>доедим завтра</b><br><small class="muted">поставлю это блюдо в меню на завтра</small></span></label>
        <button class="big-btn primary block" id="go">✅ Отметить</button>`,
       (root) => {
@@ -180,7 +192,25 @@ export async function openMarkEaten({ date, mealType = null, recipe = null, plan
     return;
   }
 
-  openSheet(`${sheetHead(`${MEAL_ICONS[mealType]} ${esc(mealName(mealType))}: что ели?`)}<div class="empty"><span class="spinner"></span></div>`);
+  // Блюдо из меню: одно подтверждение — «кто ел».
+  if (planned && !picker) {
+    openSheet(
+      `${sheetHead(`${MEAL_ICONS[mealType]} ${esc(mealName(mealType))}`)}
+       <div class="slot-big">${esc(planned.title)}</div>
+       ${whoAteHtml(whoDefault)}
+       ${leftoversBox(mealType)}
+       <button class="big-btn primary block" id="go">✅ Отметить, что съели</button>
+       <button class="big-btn block" id="other">Ели другое блюдо ›</button>`,
+      (root) => {
+        $("#go", root).onclick = () => save(planned.recipe_id ? { recipe_id: planned.recipe_id } : { title: planned.title }, mealType);
+        $("#other", root).onclick = () => openMarkEaten({ date, mealType, planned, picker: true, whoDefault });
+      },
+    );
+    return;
+  }
+
+  const title = `${MEAL_ICONS[mealType]} ${esc(mealName(mealType))}: что ели?`;
+  openSheet(`${sheetHead(title)}<div class="empty"><span class="spinner"></span></div>`);
   const suggestions = (await guard(() => api(`/suggest?meal=${mealType}&date=${date}`))) || [];
   const plannedRecipe = planned?.recipe_id ? recipeById(planned.recipe_id) : null;
   const shownIds = new Set([plannedRecipe?.id, ...suggestions.slice(0, 4).map((s) => s.recipe.id)]);
@@ -188,27 +218,29 @@ export async function openMarkEaten({ date, mealType = null, recipe = null, plan
   const pickRow = (r, sub) => `<button class="row-item" data-pick="${r.id}"><span class="row-emoji">${catEmojis(r.categories.slice(0, 3)) || "🍽"}</span>
       <span class="row-main"><span class="row-title">${esc(r.title)}</span>${sub ? `<span class="row-sub">${esc(sub)}</span>` : ""}</span></button>`;
   replaceSheet(
-    `${sheetHead(`${MEAL_ICONS[mealType]} ${esc(mealName(mealType))}: что ели?`)}
+    `${sheetHead(title)}
+     ${whoAteHtml(whoDefault)}
      ${leftoversBox(mealType)}
-     ${plannedRecipe ? `<h3>По меню</h3><div class="list">${pickRow(plannedRecipe, "было запланировано")}</div>` : planned ? `<h3>По меню</h3><div class="list"><button class="row-item" data-free-title="${esc(planned.title)}"><span class="row-emoji">🍽</span><span class="row-main"><span class="row-title">${esc(planned.title)}</span></span></button></div>` : ""}
+     <h3>Выберите блюдо</h3>
+     ${plannedRecipe ? `<div class="list">${pickRow(plannedRecipe, "по меню")}</div>` : planned ? `<div class="list"><button class="row-item" data-free-title="${esc(planned.title)}"><span class="row-emoji">🍽</span><span class="row-main"><span class="row-title">${esc(planned.title)}</span><span class="row-sub">по меню</span></span></button></div>` : ""}
      ${suggestions.length ? `<h3>Подходит сейчас</h3><div class="list">${suggestions.slice(0, 4).filter((s) => s.recipe.id !== plannedRecipe?.id).map((s) => pickRow(s.recipe, s.reasons.slice(0, 1).join(""))).join("")}</div>` : ""}
      ${others.length ? `<h3>Все рецепты</h3><input id="pick-q" type="search" placeholder="🔍 Поиск…" /><div class="list" id="pick-list">${others.map((r) => pickRow(r)).join("")}</div>` : ""}
      <h3>Другое блюдо</h3>
      <p class="muted small">Если блюда нет в книге — просто напишите его название</p>
-     <div class="inline-form"><input id="free-title" placeholder="Например: гречка с курицей" /><button class="btn primary" id="free-save">OK</button></div>`,
+     <div class="inline-form"><input id="free-title" placeholder="Например: пельмени с рыбой" /><button class="btn primary" id="free-save">OK</button></div>`,
     (root) => {
       $$("[data-pick]", root).forEach((el) => (el.onclick = () => save({ recipe_id: Number(el.dataset.pick) }, mealType)));
       $$("[data-free-title]", root).forEach((el) => (el.onclick = () => save({ title: el.dataset.freeTitle }, mealType)));
       $("#free-save", root).onclick = () => {
-        const title = $("#free-title", root).value.trim();
-        if (!title) return toast("Напишите, что ели");
-        save({ title }, mealType);
+        const t = $("#free-title", root).value.trim();
+        if (!t) return toast("Напишите, что ели");
+        save({ title: t }, mealType);
       };
       const q = $("#pick-q", root);
       if (q)
         q.oninput = () => {
-          const s = q.value.toLowerCase();
-          $$("#pick-list [data-pick]", root).forEach((el) => (el.style.display = el.textContent.toLowerCase().includes(s) ? "" : "none"));
+          const v = q.value.toLowerCase();
+          $$("#pick-list [data-pick]", root).forEach((el) => (el.style.display = el.textContent.toLowerCase().includes(v) ? "" : "none"));
         };
     },
   );

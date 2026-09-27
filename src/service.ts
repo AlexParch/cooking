@@ -2,23 +2,40 @@
 import { generateIdea } from "./ai";
 import { Repo, type PlanItem, type Recipe, type RecipeInput, type ShoppingItem } from "./db";
 import { today, type Env } from "./env";
-import { addDays, balanceSummary, computeBalance, MEAL_TYPE_KEYS, MEAL_TYPES, suggestRecipes, type MealType } from "./nutrition";
+import { addDays, balanceSummary, computeBalance, computeFamilyBalance, MEAL_TYPE_KEYS, MEAL_TYPES, mealsOf, suggestRecipes, worstBalance, type MealType } from "./nutrition";
 import { AISLE_ORDER, buildShoppingList, matchByProducts, planWeek, prepReminders, productMatcher, type PrepReminder } from "./planner";
 import { escapeHtml, Telegram } from "./telegram";
 
 /** Сколько дней истории смотрим для «давно не готовили». */
 const HISTORY_DAYS = 60;
 
-export async function getBalance(env: Env, days = 7, date = today(env)) {
+/** Баланс по каждому члену семьи (пусто, если члены семьи не заведены). */
+export async function getFamilyBalance(env: Env, days = 7, date = today(env)) {
   const repo = new Repo(env.DB);
-  const meals = await repo.listMeals(addDays(date, -HISTORY_DAYS), date);
+  const [meals, members] = await Promise.all([repo.listMeals(addDays(date, -HISTORY_DAYS), date), repo.listMembers()]);
+  return computeFamilyBalance(meals, members, date, days);
+}
+
+/**
+ * Баланс семьи. Если заведены члены семьи — по каждой группе берём худшего:
+ * родители ели рыбу, а дети нет — значит, рыбы «не хватает».
+ */
+export async function getBalance(env: Env, days = 7, date = today(env), memberId?: number) {
+  const repo = new Repo(env.DB);
+  const [meals, members] = await Promise.all([repo.listMeals(addDays(date, -HISTORY_DAYS), date), repo.listMembers()]);
+  if (memberId) return computeBalance(mealsOf(meals, memberId), date, days);
+  if (members.length) return worstBalance(computeFamilyBalance(meals, members, date, days));
   return computeBalance(meals, date, days);
 }
 
 export async function getSuggestions(env: Env, mealType?: string, date = today(env), limit = 5) {
   const repo = new Repo(env.DB);
-  const [recipes, meals] = await Promise.all([repo.listRecipes(), repo.listMeals(addDays(date, -HISTORY_DAYS), date)]);
-  return suggestRecipes(recipes, meals, date, mealType, limit);
+  const [recipes, meals, balance] = await Promise.all([
+    repo.listRecipes(),
+    repo.listMeals(addDays(date, -HISTORY_DAYS), date),
+    getBalance(env, 7, date),
+  ]);
+  return suggestRecipes(recipes, meals, date, mealType, limit, balance);
 }
 
 export async function getIdea(env: Env, mealType?: string, wish?: string, products?: string[]): Promise<RecipeInput> {
@@ -106,12 +123,29 @@ export interface DayBrief {
   prepToday: PrepReminder[];
   prepTomorrow: PrepReminder[];
   missing: string[];
+  /** Кто из семьи какую группу ещё не ел за неделю (если заведены члены семьи). */
+  gaps: { emoji: string; name: string; who: string[]; everyone: boolean }[];
 }
 
 export async function dayBrief(env: Env, date = today(env)): Promise<DayBrief> {
   const repo = new Repo(env.DB);
   const tomorrow = addDays(date, 1);
-  const [plan, recipes, balance] = await Promise.all([repo.listPlan(date, tomorrow), repo.listRecipes(), getBalance(env, 7, date)]);
+  const [plan, recipes, balance, family] = await Promise.all([
+    repo.listPlan(date, tomorrow),
+    repo.listRecipes(),
+    getBalance(env, 7, date),
+    getFamilyBalance(env, 7, date),
+  ]);
+  const gaps =
+    family.length >= 2
+      ? family[0].balance
+          .map((b, i) => {
+            const who = family.filter((f) => f.balance[i].status === "missing").map((f) => f.member.name);
+            return { emoji: b.emoji, name: b.name, who, everyone: who.length === family.length };
+          })
+          .filter((g) => g.who.length)
+          .sort((a, b) => b.who.length - a.who.length)
+      : [];
   const byId = new Map<number, Recipe>(recipes.map((r) => [r.id, r]));
   const todayPlan = plan.filter((p) => p.date === date);
   return {
@@ -120,6 +154,7 @@ export async function dayBrief(env: Env, date = today(env)): Promise<DayBrief> {
     prepToday: prepReminders(todayPlan, byId, "morning"),
     prepTomorrow: prepReminders(plan.filter((p) => p.date === tomorrow), byId, "evening"),
     missing: balanceSummary(balance).missing,
+    gaps,
   };
 }
 

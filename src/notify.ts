@@ -30,7 +30,10 @@ export async function runReminders(env: Env, now = new Date(), origin = ""): Pro
     const brief = await dayBrief(env, date);
     if (brief.plan.length) {
       const text = [`☀️ <b>Доброе утро!</b> Вот меню на сегодня:`, "", formatDay({ ...brief, prepTomorrow: [] })];
-      if (brief.missing.length) text.push("", `💡 На этой неделе ещё не было: ${h(brief.missing.slice(0, 3).join(", ").toLowerCase())}.`);
+      if (brief.gaps.length) {
+        text.push("", "💡 <b>За неделю ещё не ели:</b>");
+        for (const g of brief.gaps.slice(0, 3)) text.push(`${g.emoji} ${h(g.name)} — ${g.everyone ? "никто" : h(g.who.join(", "))}`);
+      } else if (brief.missing.length) text.push("", `💡 На этой неделе ещё не было: ${h(brief.missing.slice(0, 3).join(", ").toLowerCase())}.`);
       await broadcast(text.join("\n"), [appButton]);
     } else {
       await broadcast("☀️ <b>Доброе утро!</b>\nМеню на сегодня ещё не составлено. Хотите, я подберу блюда на всю неделю?", [

@@ -2,6 +2,7 @@
 import { openAddRecipe, voiceToRecipe } from "./add.js";
 import { mountHaveList } from "./shop.js";
 import { $, $$, addDays, api, bus, busy, closeSheet, confirmDialog, esc, guard, haptic, loadRecipes, MEAL_ICONS, MEAL_ORDER, mealName, openSheet, replaceSheet, sheetHead, state, store, toast } from "./ui.js";
+import { ensureDefaultMembers, mountMembersEditor } from "./members.js";
 import { mountRecorder } from "./voice.js";
 import { openSlot } from "./week.js";
 
@@ -64,6 +65,7 @@ const nav = (step, nextLabel, nextId = "setup-next") => `
 
 // ---------- 1. Семья ----------
 async function stepFamily(el) {
+  await ensureDefaultMembers();
   const name = state.config.me?.first_name;
   el.innerHTML = `
     <div class="setup-hero"><div class="setup-icon">👋</div>
@@ -71,9 +73,9 @@ async function stepFamily(el) {
       <p>Давайте за 10 минут всё настроим: вы надиктуете свои рецепты, я составлю меню на неделю и соберу список покупок.</p>
     </div>
     <div class="card">
-      <h2>Сколько человек в семье едят?</h2>
-      <p class="muted">На столько порций я буду пересчитывать продукты в рецептах и в покупках.</p>
-      <div class="stepper big"><button data-fs="-1">−</button><span><b id="fs">${state.config.settings.family_size}</b> чел.</span><button data-fs="1">+</button></div>
+      <h2>Кто в семье?</h2>
+      <p class="muted">Впишите имена и добавьте детей. Я буду следить за питанием <b>каждого</b> — ведь дети иногда едят не то же, что взрослые. На столько человек пересчитаю и продукты.</p>
+      <div id="members"></div>
     </div>
     ${nav(0, "Дальше →")}`;
 }
@@ -213,20 +215,12 @@ async function stepDone(el) {
 // ---------- обработчики шагов ----------
 const STEP_BINDERS = [
   (view) => {
-    let size = state.config.settings.family_size;
-    $$("[data-fs]", view).forEach(
-      (b) =>
-        (b.onclick = () => {
-          size = Math.max(1, Math.min(20, size + Number(b.dataset.fs)));
-          $("#fs", view).textContent = size;
-          haptic("light");
-        }),
-    );
-    $("#setup-next", view).onclick = () =>
-      guard(async () => {
-        state.config.settings = await api("/settings", { method: "PUT", body: { family_size: size } });
-        go(1);
-      });
+    mountMembersEditor($("#members", view));
+    $("#setup-next", view).onclick = () => {
+      // Имена сохраняются при выходе из поля — дадим этому случиться.
+      document.activeElement?.blur?.();
+      setTimeout(() => go(1), 150);
+    };
   },
   (view) => {
     mountRecorder($("#rec", view), { idle: "Нажмите и расскажите рецепт", onText: voiceToRecipe });

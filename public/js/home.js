@@ -1,11 +1,17 @@
 // Главный экран: что сегодня едим, напоминания, большие кнопки действий.
 import { openAddRecipe, openFridge, openIdea } from "./add.js";
+import { bindFamilyGrid, eatersBadge, familyGridHtml, hasFamily, members } from "./members.js";
 import { openMarkEaten, openRecipe, startCooking } from "./recipes.js";
 import { $$, api, bus, catEmojis, esc, greeting, guard, haptic, hint, MEAL_ICONS, MEAL_ORDER, mealName, prettyDate, recipeById, state, toast } from "./ui.js";
 
 export async function renderHome(view) {
   const date = state.config.today;
-  const [brief, meals, balance] = await Promise.all([api(`/brief?date=${date}`), api(`/meals?from=${date}&to=${date}`), api("/balance?days=7")]);
+  const [brief, meals, balance, family] = await Promise.all([
+    api(`/brief?date=${date}`),
+    api(`/meals?from=${date}&to=${date}`),
+    api("/balance?days=7"),
+    hasFamily() ? api("/balance/family?days=7") : Promise.resolve([]),
+  ]);
   const name = state.config.me?.first_name || "";
   const missing = balance.filter((b) => b.status === "missing").slice(0, 4);
   const noRecipes = state.recipes.length === 0;
@@ -15,10 +21,13 @@ export async function renderHome(view) {
     const planned = brief.plan.find((p) => p.meal_type === k);
     const plannedRecipe = planned?.recipe_id ? recipeById(planned.recipe_id) : null;
     let body;
+    // Кто в этот приём пищи ещё ничего не ел (если ели не все).
+    const ateIds = eaten.some((m) => !m.eaters?.length) ? members().map((x) => x.id) : [...new Set(eaten.flatMap((m) => m.eaters || []))];
+    const notYet = members().filter((x) => !ateIds.includes(x.id));
     if (eaten.length) {
       body = eaten
         .map(
-          (m) => `<div class="slot-dish done">✅ ${esc(m.title)}</div>
+          (m) => `<div class="slot-dish done">✅ ${esc(m.title)}</div>${eatersBadge(m.eaters)}
           ${
             m.recipe_id
               ? m.rating == null
@@ -28,6 +37,10 @@ export async function renderHome(view) {
           }`,
         )
         .join("");
+      if (hasFamily())
+        body += notYet.length
+          ? `<button class="btn secondary block other-dish" data-eat-more="${k}" data-who-ids="${notYet.map((x) => x.id).join(",")}">＋ ${esc(notYet.map((x) => x.name).join(", "))} — что ели?</button>`
+          : `<button class="link small" data-eat-more="${k}">＋ ещё блюдо</button>`;
     } else if (planned) {
       body = `<div class="slot-dish">${esc(planned.title)}${planned.leftovers ? ' <span class="badge">доедаем</span>' : ""}</div>
         <div class="slot-btns">
@@ -70,6 +83,16 @@ export async function renderHome(view) {
       ${MEAL_ORDER.map(slot).join("")}
     </div>
 
+    ${
+      family.length
+        ? `<div class="card family-card">
+            <div class="card-head"><h2>👨‍👩‍👧‍👦 Кто что ел за неделю</h2></div>
+            ${hint("family-grid", "Строка — человек, столбец — группа продуктов. <b>✓</b> — хватает, <b>цифра</b> — сколько раз (маловато), <b>—</b> — не было. Нажмите на клетку, чтобы увидеть подробнее.")}
+            ${familyGridHtml(family)}
+          </div>`
+        : ""
+    }
+
     <div class="grid-2 actions-grid">
       <button class="tile" data-action="add-recipe"><span class="tile-icon">🎙</span><b>Добавить рецепт</b><small>голосом, фото, ссылкой</small></button>
       <button class="tile" data-action="fridge"><span class="tile-icon">🧺</span><b>Что приготовить?</b><small>из того, что есть дома</small></button>
@@ -78,7 +101,7 @@ export async function renderHome(view) {
     </div>
 
     ${
-      missing.length && !noRecipes
+      missing.length && !noRecipes && !family.length
         ? `<button class="card balance-mini" data-tab-go="balance">
             <h3>📊 На этой неделе не было</h3>
             <div class="miss">${missing.map((b) => `<span class="tag big">${b.emoji} ${esc(b.name)}</span>`).join("")}</div>
@@ -91,6 +114,15 @@ export async function renderHome(view) {
   $$("[data-eat]", view).forEach(
     (b) => (b.onclick = () => openMarkEaten({ date, mealType: b.dataset.eat, planned: brief.plan.find((p) => p.meal_type === b.dataset.eat) })),
   );
+  $$("[data-eat-more]", view).forEach(
+    (b) =>
+      (b.onclick = () =>
+        openMarkEaten({ date, mealType: b.dataset.eatMore, picker: true, whoDefault: b.dataset.whoIds ? b.dataset.whoIds.split(",").map(Number) : null })),
+  );
+  bindFamilyGrid(view, (id) => {
+    state.balanceMember = id;
+    bus.go("balance");
+  });
   $$("[data-cook]", view).forEach((b) => (b.onclick = () => startCooking(recipeById(Number(b.dataset.cook)), state.config.settings.family_size)));
   $$("[data-open]", view).forEach((b) => (b.onclick = () => openRecipe(Number(b.dataset.open))));
   $$("[data-rate]", view).forEach(

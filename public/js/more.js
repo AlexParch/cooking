@@ -1,6 +1,7 @@
 // «Ещё»: баланс питания, шпаргалка замен, настройки, помощь и знакомство.
 import { openFridge, openIdea } from "./add.js";
 import { $, $$, api, bus, esc, guard, haptic, hint, openSheet, sheetHead, state, store, toast } from "./ui.js";
+import { bindFamilyGrid, familyGridHtml, hasFamily, members, mountMembersEditor } from "./members.js";
 
 export function renderMore(view) {
   view.innerHTML = `
@@ -13,7 +14,7 @@ export function renderMore(view) {
       <button class="row-item" data-open="settings"><span class="row-emoji">⚙️</span><span class="row-main"><span class="row-title">Настройки</span><span class="row-sub">размер семьи, напоминания</span></span><span class="row-arrow">›</span></button>
       <button class="row-item" data-open="help"><span class="row-emoji">❓</span><span class="row-main"><span class="row-title">Как пользоваться</span><span class="row-sub">короткая инструкция</span></span><span class="row-arrow">›</span></button>
     </div>`;
-  $$("[data-go]", view).forEach((b) => (b.onclick = () => bus.go(b.dataset.go)));
+  $$("[data-go]", view).forEach((b) => (b.onclick = () => ((state.balanceMember = null), bus.go(b.dataset.go))));
   $$("[data-open]", view).forEach(
     (b) => (b.onclick = () => ({ fridge: openFridge, idea: () => openIdea(), subs: openSubstitutions, settings: openSettings, help: () => showOnboarding(true) })[b.dataset.open]()),
   );
@@ -23,15 +24,27 @@ export function renderMore(view) {
 let balanceDays = 7;
 
 export async function renderBalance(view) {
-  const balance = await api(`/balance?days=${balanceDays}`);
+  const member = hasFamily() ? members().find((m) => m.id === state.balanceMember) : null;
+  const [balance, family] = await Promise.all([
+    api(`/balance?days=${balanceDays}${member ? `&member=${member.id}` : ""}`),
+    hasFamily() && !member ? api(`/balance/family?days=${balanceDays}`) : Promise.resolve([]),
+  ]);
   const need = balance.filter((b) => b.status !== "ok");
   view.innerHTML = `
-    <div class="page-head"><button class="back-link" data-go="more">‹ Назад</button><h1>📊 Баланс питания</h1></div>
+    <div class="page-head"><button class="back-link" data-go="more">‹ Назад</button><h1>📊 ${member ? `${member.emoji} ${esc(member.name)}` : "Баланс питания"}</h1></div>
     ${hint("balance", "Здесь видно, сколько раз за период в меню были разные продукты. <b>Зелёная</b> полоска — всё хорошо, <b>жёлтая</b> — маловато, <b>красная</b> — не было совсем. Считается по тому, что вы отмечаете «Съели».")}
+    ${
+      hasFamily()
+        ? `<div class="chips scroll-x">${[{ id: 0, emoji: "👨‍👩‍👧‍👦", name: "Вся семья" }, ...members()]
+            .map((m) => `<button class="chip ${(member?.id ?? 0) === m.id ? "on" : ""}" data-member="${m.id}">${m.emoji} ${esc(m.name)}</button>`)
+            .join("")}</div>`
+        : ""
+    }
     <div class="chips">${[7, 14, 30].map((d) => `<button class="chip ${d === balanceDays ? "on" : ""}" data-days="${d}">${d} дней</button>`).join("")}</div>
+    ${family.length ? `<div class="card">${familyGridHtml(family, balanceDays)}</div>` : ""}
     ${
       need.length
-        ? `<div class="card"><h3>Чего не хватает</h3>${need
+        ? `<div class="card"><h3>${member ? `Чего не хватает: ${esc(member.name)}` : hasFamily() ? "Чего не хватает (хоть кому-то)" : "Чего не хватает"}</h3>${need
             .slice(0, 6)
             .map((b) => `<div class="need"><b>${b.emoji} ${esc(b.name)}</b> <span class="muted">${b.count === 0 ? (b.daysSince == null ? "давно не было" : `не было ${b.daysSince} дн.`) : `${b.count} из ${b.target}`}</span><div class="muted small">Идеи: ${esc(b.ideas.join(", "))}</div></div>`)
             .join("")}
@@ -46,6 +59,8 @@ export async function renderBalance(view) {
       .join("")}</div>
     <p class="muted small">Цифра справа — сколько раз было и сколько желательно за период для разнообразия.</p>`;
   $$("[data-days]", view).forEach((c) => (c.onclick = () => ((balanceDays = Number(c.dataset.days)), bus.render())));
+  $$("[data-member]", view).forEach((c) => (c.onclick = () => ((state.balanceMember = Number(c.dataset.member) || null), bus.render())));
+  bindFamilyGrid(view, (id) => ((state.balanceMember = id), bus.render()));
   $$("[data-go]", view).forEach((b) => (b.onclick = () => bus.go(b.dataset.go)));
   const idea = $("[data-idea]", view);
   if (idea) idea.onclick = () => openIdea();
@@ -87,10 +102,9 @@ function openSettings() {
   const hours = (from, to, sel) => Array.from({ length: to - from + 1 }, (_, i) => from + i).map((h) => `<option value="${h}" ${h === sel ? "selected" : ""}>${h}:00</option>`).join("");
   openSheet(
     `${sheetHead("⚙️ Настройки")}
-     <div class="setting">
-       <div><b>Сколько человек в семье</b><div class="muted small">На столько порций я пересчитываю продукты в рецептах и в списке покупок</div></div>
-       <div class="stepper"><button data-fs="-1">−</button><span><b id="fs">${s.family_size}</b></span><button data-fs="1">+</button></div>
-     </div>
+     <h3>👨‍👩‍👧‍👦 Семья</h3>
+     <p class="muted small">Для каждого считается свой баланс. Сколько человек — на столько порций пересчитываю продукты. Нажмите на значок, чтобы сменить его.</p>
+     <div id="members"></div>
      <div class="setting">
        <label class="check-row"><input type="checkbox" id="nm" ${s.notify_morning ? "checked" : ""}/><span><b>☀️ Утром присылать меню на день</b><br><small class="muted">и напоминать, что достать из морозилки</small></span></label>
        <select id="mh">${hours(5, 12, s.morning_hour)}</select>
@@ -105,20 +119,12 @@ function openSettings() {
      ${!state.config.me ? `<div class="notice">Чтобы получать сообщения, напишите боту в чат /start</div>` : ""}
      <button class="big-btn primary block" id="save">Сохранить</button>`,
     (root) => {
-      $$("[data-fs]", root).forEach(
-        (b) =>
-          (b.onclick = () => {
-            s.family_size = Math.max(1, Math.min(20, s.family_size + Number(b.dataset.fs)));
-            $("#fs", root).textContent = s.family_size;
-            haptic("light");
-          }),
-      );
+      mountMembersEditor($("#members", root), { onChange: (list) => (s.family_size = list.length || s.family_size) });
       $("#save", root).onclick = () =>
         guard(async () => {
           const settings = await api("/settings", {
             method: "PUT",
             body: {
-              family_size: s.family_size,
               notify_morning: $("#nm", root).checked,
               morning_hour: Number($("#mh", root).value),
               notify_evening: $("#ne", root).checked,

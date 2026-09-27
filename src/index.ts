@@ -6,7 +6,7 @@ import { runReminders } from "./notify";
 import { addDays, CATEGORIES, MEAL_TYPES } from "./nutrition";
 import { aisleFor, AISLE_ORDER, splitProducts } from "./planner";
 import { STARTER } from "./starter";
-import { dayBrief, fillPlan, fromProducts, getBalance, getIdea, getSuggestions, markHave, sendShoppingList, shoppingFromPlan, swapPlan } from "./service";
+import { dayBrief, fillPlan, fromProducts, getBalance, getFamilyBalance, getIdea, getSuggestions, markHave, sendShoppingList, shoppingFromPlan, swapPlan } from "./service";
 import { escapeHtml, Telegram, verifyInitData } from "./telegram";
 
 const json = (data: unknown, status = 200) =>
@@ -130,6 +130,7 @@ async function api(request: Request, env: Env, url: URL): Promise<Response> {
       voice: voiceEnabled(env),
       settings,
       me: users.find((u) => u.id === userId) ?? null,
+      members: await repo.listMembers(),
       mealTypes: MEAL_TYPES,
       aisles: AISLE_ORDER,
       categories: CATEGORIES.map(({ keywords, ...c }) => c),
@@ -199,7 +200,7 @@ async function api(request: Request, env: Env, url: URL): Promise<Response> {
     return json(await repo.listMeals(from, to));
   }
   if (path === "/meals" && method === "POST") {
-    const input = await body<{ date: string; meal_type: string; recipe_id?: number; title?: string; categories?: string[]; leftovers?: boolean }>();
+    const input = await body<{ date: string; meal_type: string; recipe_id?: number; title?: string; categories?: string[]; leftovers?: boolean; eaters?: number[] }>();
     const meal = await repo.addMeal(input, userId);
     // «Приготовила с запасом» — ставим это же блюдо на завтра как «доедаем».
     if (input.leftovers) await repo.setPlan({ date: addDays(meal.date, 1), meal_type: meal.meal_type, recipe_id: meal.recipe_id, title: meal.title, leftovers: true });
@@ -287,7 +288,19 @@ async function api(request: Request, env: Env, url: URL): Promise<Response> {
   // ---------- подсказки ----------
   if (path === "/balance" && method === "GET") {
     const days = Math.min(60, Math.max(1, Number(q("days")) || 7));
-    return json(await getBalance(env, days, date));
+    return json(await getBalance(env, days, date, Number(q("member")) || undefined));
+  }
+  if (path === "/balance/family" && method === "GET") {
+    const days = Math.min(60, Math.max(1, Number(q("days")) || 7));
+    return json(await getFamilyBalance(env, days, date));
+  }
+
+  // ---------- члены семьи ----------
+  if (path === "/members" && method === "GET") return json(await repo.listMembers());
+  if (path === "/members" && method === "POST") return json(await repo.saveMember(await body()));
+  if ((m = path.match(/^\/members\/(\d+)$/))) {
+    if (method === "PUT") return json(await repo.saveMember({ ...(await body<object>()), id: Number(m[1]) }));
+    if (method === "DELETE") return json(await repo.deleteMember(Number(m[1])));
   }
   if (path === "/suggest" && method === "GET") return json(await getSuggestions(env, q("meal") || undefined, date, 8));
   if (path === "/idea" && method === "POST") {

@@ -30,6 +30,17 @@ describe("SQLite вместо D1 (свой сервер)", () => {
     const meal = await repo.addMeal({ date: "2026-09-28", meal_type: "lunch", recipe_id: r.id }, 1);
     await repo.rateMeal(meal.id, 2);
     expect((await repo.getRecipe(r.id))?.likes).toBe(2);
+    // члены семьи и «кто ел»
+    const members = await repo.saveMember({ name: "Мама", emoji: "👩" });
+    await repo.saveMember({ name: "Миша", kind: "child" });
+    const all = await repo.listMembers();
+    expect(all.map((x) => x.name)).toEqual(["Мама", "Миша"]);
+    expect((await repo.getSettings()).family_size).toBe(2);
+    const onlyKid = await repo.addMeal({ date: "2026-09-28", meal_type: "dinner", title: "Пельмени", eaters: [all[1].id] }, 1);
+    expect(onlyKid.eaters).toEqual([all[1].id]);
+    const everyone = await repo.addMeal({ date: "2026-09-28", meal_type: "dinner", title: "Салат", eaters: all.map((x) => x.id) }, 1);
+    expect(everyone.eaters).toBeNull(); // все — хранится как «вся семья»
+    expect(members).toHaveLength(1);
     await repo.deleteRecipe(r.id);
     expect(await repo.getRecipe(r.id)).toBeNull();
   });
