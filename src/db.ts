@@ -67,6 +67,8 @@ export interface Settings {
   evening_hour: number;
   notify_morning: boolean;
   notify_evening: boolean;
+  /** Мастер первого запуска пройден. */
+  setup_done: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -75,6 +77,7 @@ export const DEFAULT_SETTINGS: Settings = {
   evening_hour: 20,
   notify_morning: true,
   notify_evening: true,
+  setup_done: false,
 };
 
 const json = (v: unknown) => JSON.stringify(v ?? []);
@@ -428,6 +431,23 @@ export class Repo {
   async markSent(key: string): Promise<boolean> {
     const res = await this.db.prepare("INSERT OR IGNORE INTO sent (key) VALUES (?)").bind(key).run();
     return Boolean(res.meta.changes);
+  }
+
+  /** Чего бот ждёт от пользователя в чате (например, список «что есть дома»). Живёт 30 минут. */
+  async getChatState(userId: number): Promise<string | null> {
+    const v = await this.db.prepare("SELECT value FROM settings WHERE key = ?").bind(`state:${userId}`).first<string>("value");
+    if (!v) return null;
+    const { mode, at } = JSON.parse(v) as { mode: string; at: number };
+    return Date.now() - at < 30 * 60_000 ? mode : null;
+  }
+
+  async setChatState(userId: number, mode: string | null): Promise<void> {
+    if (!mode) await this.db.prepare("DELETE FROM settings WHERE key = ?").bind(`state:${userId}`).run();
+    else
+      await this.db
+        .prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .bind(`state:${userId}`, JSON.stringify({ mode, at: Date.now() }))
+        .run();
   }
 
   // ---------- черновики ----------

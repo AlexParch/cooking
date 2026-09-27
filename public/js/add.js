@@ -1,6 +1,7 @@
 // Добавление рецептов: голос, текст, ссылка, фото. И «что приготовить из того, что есть».
 import { openEditor, openRecipe, recipeRow } from "./recipes.js";
-import { $, $$, api, busy, esc, guard, haptic, openSheet, replaceSheet, sheetHead, state, toast, tg } from "./ui.js";
+import { $, $$, api, busy, esc, guard, haptic, openSheet, replaceSheet, sheetHead, state, toast } from "./ui.js";
+import { mountRecorder } from "./voice.js";
 
 const needAi = () => {
   if (state.config.ai) return true;
@@ -34,82 +35,26 @@ export function openAddRecipe() {
 }
 
 /** Показать разобранный ИИ рецепт: сохранить сразу или поправить. */
-async function reviewParsed(recipe) {
+export async function reviewParsed(recipe) {
   haptic();
   openEditor(recipe, { title: "Проверьте рецепт" });
 }
 
 // ---------- голос ----------
-const canRecord = () => Boolean(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
+/** Надиктовать рецепт: запись → текст → Claude оформляет → проверка и сохранение. */
+export async function voiceToRecipe(text, setStatus) {
+  if (!state.config.ai) return reviewParsed({ title: text.split(/[.!?\n]/)[0].slice(0, 60), notes: text, ingredients: [], steps: [], meal_types: [], categories: [], source: "voice" });
+  setStatus(`<span class="spinner"></span> Оформляю рецепт…<br><small class="muted">«${esc(text.slice(0, 140))}${text.length > 140 ? "…" : ""}»</small>`);
+  await reviewParsed(await api("/recipes/parse", { method: "POST", body: { text, source: "voice" } }));
+}
 
 function openVoice() {
-  if (!state.config.voice) return toast("Распознавание голоса пока не подключено", 4000);
-  const chatTip = `<div class="notice">💬 <b>Можно и в чате:</b> закройте приложение и отправьте боту обычное голосовое сообщение — я сохраню рецепт так же.</div>`;
-  if (!canRecord()) {
-    openSheet(`${sheetHead("🎙 Рассказать голосом")}${chatTip}<button class="big-btn primary block" id="close-app">Перейти в чат</button>`, (root) => {
-      $("#close-app", root).onclick = () => tg?.close?.();
-    });
-    return;
-  }
-  let recorder = null;
-  let chunks = [];
-  let startedAt = 0;
-  let tick = null;
-
   openSheet(
     `${sheetHead("🎙 Рассказать голосом")}
      <p class="muted">Нажмите на кнопку и расскажите: как называется блюдо, какие продукты и сколько, как готовить. Можно сбиваться — я разберусь.</p>
-     <div class="mic-wrap"><button class="mic" id="mic" aria-label="Записать">🎙</button><div class="mic-label" id="mic-label">Нажмите, чтобы начать</div></div>
-     ${chatTip}`,
-    (root) => {
-      const mic = $("#mic", root);
-      const label = $("#mic-label", root);
-      mic.onclick = async () => {
-        if (recorder?.state === "recording") {
-          recorder.stop();
-          return;
-        }
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          chunks = [];
-          recorder = new MediaRecorder(stream);
-          recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-          recorder.onstop = async () => {
-            clearInterval(tick);
-            stream.getTracks().forEach((t) => t.stop());
-            mic.classList.remove("rec");
-            mic.textContent = "🎙";
-            mic.disabled = true;
-            label.innerHTML = `<span class="spinner"></span> Слушаю запись…`;
-            const type = recorder.mimeType || "audio/webm";
-            const ext = type.includes("mp4") ? "m4a" : type.includes("ogg") ? "ogg" : "webm";
-            await guard(async () => {
-              const form = new FormData();
-              form.append("audio", new Blob(chunks, { type }), `voice.${ext}`);
-              const { text } = await api("/transcribe", { method: "POST", body: form });
-              if (!text) throw new Error("Не расслышала — попробуйте ещё раз, поближе к телефону");
-              if (!state.config.ai) return reviewParsed({ title: text.split(/[.!?\n]/)[0].slice(0, 60), notes: text, ingredients: [], steps: [], meal_types: [], categories: [], source: "voice" });
-              label.innerHTML = `<span class="spinner"></span> Оформляю рецепт…<br><small class="muted">«${esc(text.slice(0, 140))}${text.length > 140 ? "…" : ""}»</small>`;
-              await reviewParsed(await api("/recipes/parse", { method: "POST", body: { text, source: "voice" } }));
-            });
-            mic.disabled = false;
-            label.textContent = "Нажмите, чтобы записать заново";
-          };
-          recorder.start();
-          startedAt = Date.now();
-          mic.classList.add("rec");
-          mic.textContent = "⏹";
-          haptic("light");
-          tick = setInterval(() => {
-            const s = Math.round((Date.now() - startedAt) / 1000);
-            label.innerHTML = `🔴 Идёт запись ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}<br><b>Нажмите ещё раз, когда закончите</b>`;
-          }, 500);
-          label.innerHTML = `🔴 Идёт запись…<br><b>Нажмите ещё раз, когда закончите</b>`;
-        } catch (e) {
-          toast("Нет доступа к микрофону. Отправьте голосовое боту в чат — так тоже можно 🙂", 5000);
-        }
-      };
-    },
+     <div id="rec"></div>
+     <div class="notice">💬 <b>Можно и в чате:</b> отправьте боту обычное голосовое сообщение — я сохраню рецепт так же.</div>`,
+    (root) => mountRecorder($("#rec", root), { idle: "Нажмите, чтобы начать", onText: voiceToRecipe }),
   );
 }
 

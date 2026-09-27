@@ -41,6 +41,7 @@ export async function renderHome(view) {
   };
 
   view.innerHTML = `
+    ${!state.config.settings.setup_done ? `<button class="card continue-setup" data-tab-go="setup"><b>🚀 Продолжить настройку</b><div class="muted">рецепты → меню → список покупок</div></button>` : ""}
     <div class="hello"><h1>${greeting()}${name ? `, ${esc(name)}` : ""}! 👋</h1><div class="muted">${esc(prettyDate(date))}</div></div>
 
     ${

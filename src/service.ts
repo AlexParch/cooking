@@ -1,9 +1,10 @@
 // Общая логика для бота, WebApp и напоминаний.
 import { generateIdea } from "./ai";
-import { Repo, type PlanItem, type Recipe, type RecipeInput } from "./db";
+import { Repo, type PlanItem, type Recipe, type RecipeInput, type ShoppingItem } from "./db";
 import { today, type Env } from "./env";
 import { addDays, balanceSummary, computeBalance, MEAL_TYPE_KEYS, MEAL_TYPES, suggestRecipes, type MealType } from "./nutrition";
-import { buildShoppingList, matchByProducts, planWeek, prepReminders, type PrepReminder } from "./planner";
+import { AISLE_ORDER, buildShoppingList, matchByProducts, planWeek, prepReminders, productMatcher, type PrepReminder } from "./planner";
+import { escapeHtml, Telegram } from "./telegram";
 
 /** Сколько дней истории смотрим для «давно не готовили». */
 const HISTORY_DAYS = 60;
@@ -123,3 +124,43 @@ export async function dayBrief(env: Env, date = today(env)): Promise<DayBrief> {
 }
 
 export const mealName = (k: string) => MEAL_TYPES[k as MealType] ?? k;
+
+// ---------- «что уже есть дома» ----------
+
+/** Отмечает в списке покупок то, что уже есть дома (по названиям, с учётом падежей). */
+export async function markHave(env: Env, products: string[]) {
+  const repo = new Repo(env.DB);
+  const items = (await repo.listShopping()).filter((i) => !i.checked);
+  const has = productMatcher(products);
+  const matched = items.filter((i) => has(i.name));
+  if (matched.length) await env.DB.batch(matched.map((i) => env.DB.prepare("UPDATE shopping SET checked = 1 WHERE id = ?").bind(i.id)));
+  return { matched, left: items.filter((i) => !matched.includes(i)) };
+}
+
+/** Текст списка покупок по отделам (HTML для Telegram). */
+export function shoppingText(items: ShoppingItem[], title = "🛒 <b>Список покупок</b>"): string {
+  const lines = [title];
+  for (const aisle of AISLE_ORDER) {
+    const group = items.filter((i) => i.aisle === aisle && !i.checked);
+    if (!group.length) continue;
+    lines.push("", `<b>${aisle}</b>`, ...group.map((i) => `▫️ ${escapeHtml(i.name)}${i.amount ? ` — ${escapeHtml(i.amount)}` : ""}`));
+  }
+  return lines.join("\n").slice(0, 4000);
+}
+
+/** Отправляет список покупок в чат: только себе или всей семье. */
+export async function sendShoppingList(env: Env, fromUserId: number, toFamily: boolean): Promise<number> {
+  const repo = new Repo(env.DB);
+  const items = (await repo.listShopping()).filter((i) => !i.checked);
+  if (!items.length) throw new Error("Список покупок пуст");
+  const users = await repo.listUsers();
+  const me = users.find((u) => u.id === fromUserId);
+  const targets = toFamily ? users : me ? [me] : [];
+  if (!targets.length) throw new Error("Напишите боту /start, чтобы он мог присылать сообщения");
+  const tg = new Telegram(env.TELEGRAM_BOT_TOKEN);
+  for (const u of targets) {
+    const title = u.id === fromUserId || !me ? "🛒 <b>Список покупок</b>" : `🛒 <b>Список покупок от ${escapeHtml(me.first_name || "семьи")}</b>`;
+    await tg.send(u.chat_id, shoppingText(items, title));
+  }
+  return targets.length;
+}

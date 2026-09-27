@@ -295,7 +295,8 @@ export function openEditor(r = null, { title } = {}) {
             toast(isNew ? "Рецепт сохранён в книгу 📖" : "Сохранено");
             closeSheet();
             bus.render();
-            openRecipe(saved.id);
+            // В мастере первого запуска сразу возвращаемся к списку — можно диктовать следующий.
+            if (!state.setupActive) openRecipe(saved.id);
           }),
         );
     },

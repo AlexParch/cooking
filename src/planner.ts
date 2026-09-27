@@ -63,7 +63,7 @@ export interface PrepReminder {
 
 /** Нужна ли подготовка с вечера (замачивание, разморозка на ночь). */
 export const isOvernight = (r: Pick<Recipe, "prep_ahead" | "prep_hours">) =>
-  Boolean(r.prep_ahead) && (r.prep_hours == null ? true : r.prep_hours > 10);
+  Boolean(r.prep_ahead) && (r.prep_hours == null ? true : r.prep_hours >= 8);
 
 export function prepReminders(plan: PlanItem[], recipes: Map<number, Recipe>, when: "evening" | "morning"): PrepReminder[] {
   const out: PrepReminder[] = [];
@@ -84,12 +84,16 @@ export const AISLES = [
   { name: "Мясо и птица", cats: ["meat", "poultry", "offal"] },
   { name: "Рыба и морепродукты", cats: ["fish", "seafood"] },
   { name: "Молочное и яйца", cats: ["dairy", "eggs"] },
-  { name: "Крупы и бобовые", cats: ["grains", "legumes"] },
+  { name: "Крупы, мука, бобовые", cats: ["grains", "legumes"] },
   { name: "Орехи и семена", cats: ["nuts"] },
 ] as const;
 export const AISLE_ORDER = [...AISLES.map((a) => a.name), "Прочее"];
 
 export function aisleFor(name: string): string {
+  const n = name.toLowerCase();
+  if (/мука|крахмал/.test(n)) return "Крупы, мука, бобовые";
+  // Соусы, пасты, масла, специи — в бакалею, даже если там «томат» или «орех».
+  if (/паст|соус|сок\b|масл|специ|приправ|уксус|ванил|сироп|эритрит|стеви/.test(n)) return "Прочее";
   const cats = detectCategories([name]);
   return AISLES.find((a) => a.cats.some((c) => (cats as string[]).includes(c)))?.name ?? "Прочее";
 }
@@ -109,6 +113,8 @@ const normName = (s: string) =>
 function bigUnits(value: number, unit: string): string {
   if (value >= 1000 && /^(г|гр|грамм\S*)$/.test(unit)) return `${String(Math.round(value / 100) / 10).replace(".", ",")} кг`;
   if (value >= 1000 && /^(мл|миллилитр\S*)$/.test(unit)) return `${String(Math.round(value / 100) / 10).replace(".", ",")} л`;
+  // Штуки покупаем целыми: «8,5 шт» → «9 шт».
+  if (/^(шт|штук\S*|зубч\S*|пуч\S*|банк\S*|упаков\S*)$/.test(unit)) return `${Math.ceil(value - 0.01)} ${unit}`;
   return `${formatNumber(value)}${unit ? ` ${unit}` : ""}`;
 }
 
@@ -167,12 +173,27 @@ export interface ProductMatch {
   ratio: number;
 }
 
-export function matchByProducts(recipes: Recipe[], products: string[], limit = 5): ProductMatch[] {
+/** Проверка «этот ингредиент есть среди продуктов» с учётом падежей: «кабачок» ≈ «кабачки». */
+export function productMatcher(products: string[]): (name: string) => boolean {
   const productStems = products.map(stems).filter((s) => s.length);
-  const has = (ingredient: string) => {
-    const s = stems(ingredient);
+  return (name: string) => {
+    const s = stems(name);
     return productStems.some((ps) => ps.some((p) => s.some((x) => x.startsWith(p) || p.startsWith(x))));
   };
+}
+
+/** «У меня есть гречка, яйца и морковь» → ["гречка", "яйца", "морковь"]. */
+export function splitProducts(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/(у меня|дома|уже|ещё|еще|есть|имеется|осталось|остались|немного|пачка|пачки)/g, " ")
+    .split(/[,.;:!?\n]+|\s+и\s+|\s+а также\s+/)
+    .map((s) => s.replace(/\s+/g, " ").trim())
+    .filter((s) => s.length >= 2);
+}
+
+export function matchByProducts(recipes: Recipe[], products: string[], limit = 5): ProductMatch[] {
+  const has = productMatcher(products);
   return recipes
     .map((recipe) => {
       const main = recipe.ingredients.filter((i) => !STAPLES.test(normName(i.name)));

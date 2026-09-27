@@ -4,8 +4,9 @@ import { HttpError, Repo, type RecipeInput, type Settings } from "./db";
 import { allowedIds, today, type Env } from "./env";
 import { runReminders } from "./notify";
 import { addDays, CATEGORIES, MEAL_TYPES } from "./nutrition";
-import { aisleFor, AISLE_ORDER } from "./planner";
-import { dayBrief, fillPlan, fromProducts, getBalance, getIdea, getSuggestions, shoppingFromPlan, swapPlan } from "./service";
+import { aisleFor, AISLE_ORDER, splitProducts } from "./planner";
+import { STARTER } from "./starter";
+import { dayBrief, fillPlan, fromProducts, getBalance, getIdea, getSuggestions, markHave, sendShoppingList, shoppingFromPlan, swapPlan } from "./service";
 import { escapeHtml, Telegram, verifyInitData } from "./telegram";
 
 const json = (data: unknown, status = 200) =>
@@ -84,13 +85,13 @@ async function setup(env: Env, url: URL): Promise<Response> {
   return json({ ok: true, bot: `@${me.username}`, webhook: `${url.origin}/telegram/webhook`, ai: aiEnabled(env), voice: voiceEnabled(env), allowed: [...allowedIds(env)] });
 }
 
-async function authUser(request: Request, env: Env): Promise<number> {
+async function authUser(request: Request, env: Env): Promise<{ id: number; first_name?: string }> {
   const initData = request.headers.get("X-Telegram-Init-Data") ?? "";
-  if (!initData && env.DEV_AUTH === "1") return [...allowedIds(env)][0] ?? 0;
+  if (!initData && env.DEV_AUTH === "1") return { id: [...allowedIds(env)][0] ?? 0, first_name: "Тест" };
   const user = await verifyInitData(initData, env.TELEGRAM_BOT_TOKEN);
   if (!user) throw new HttpError(401, "Откройте приложение из Telegram");
   if (!allowedIds(env).has(user.id)) throw new HttpError(403, `Нет доступа. Ваш Telegram ID: ${user.id}`);
-  return user.id;
+  return user;
 }
 
 const isDate = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
@@ -107,7 +108,8 @@ async function fileFromForm(request: Request, field: string, maxMb: number): Pro
 }
 
 async function api(request: Request, env: Env, url: URL): Promise<Response> {
-  const userId = await authUser(request, env);
+  const user = await authUser(request, env);
+  const userId = user.id;
   const repo = new Repo(env.DB);
   const path = url.pathname.replace(/^\/api/, "");
   const method = request.method;
@@ -118,6 +120,8 @@ async function api(request: Request, env: Env, url: URL): Promise<Response> {
 
   // ---------- общее ----------
   if (path === "/config" && method === "GET") {
+    // Запоминаем человека, чтобы бот мог ему писать (в личке chat_id = id пользователя).
+    if (!(await repo.listUsers()).some((u) => u.id === userId)) await repo.touchUser(userId, userId, user.first_name ?? "");
     const [settings, users] = await Promise.all([repo.getSettings(), repo.listUsers()]);
     return json({
       userId,
@@ -250,18 +254,34 @@ async function api(request: Request, env: Env, url: URL): Promise<Response> {
     return json({ ok: true });
   }
   if (path === "/shopping/send" && method === "POST") {
-    // Отправить список в чат — удобно переслать мужу.
-    const items = (await repo.listShopping()).filter((i) => !i.checked);
-    if (!items.length) throw new HttpError(400, "Список пуст");
-    const lines = ["🛒 <b>Список покупок</b>"];
-    for (const aisle of AISLE_ORDER) {
-      const group = items.filter((i) => i.aisle === aisle);
-      if (!group.length) continue;
-      lines.push("", `<b>${aisle}</b>`, ...group.map((i) => `▫️ ${escapeHtml(i.name)}${i.amount ? ` — ${escapeHtml(i.amount)}` : ""}`));
+    // Отправить список в чат — себе или всей семье (мужу в магазин).
+    const { to } = await body<{ to?: "me" | "family" }>().catch(() => ({ to: "me" as const }));
+    try {
+      return json({ sent: await sendShoppingList(env, userId, to === "family") });
+    } catch (e) {
+      throw new HttpError(400, (e as Error).message);
     }
-    const me = (await repo.listUsers()).find((u) => u.id === userId);
-    await new Telegram(env.TELEGRAM_BOT_TOKEN).send(me?.chat_id ?? userId, lines.join("\n").slice(0, 4000));
-    return json({ ok: true });
+  }
+  if (path === "/shopping/have" && method === "POST") {
+    // «Что уже есть дома»: голосом/текстом — отмечаем найденное как «есть».
+    const { text, products } = await body<{ text?: string; products?: string[] }>();
+    const list = products?.length ? products : splitProducts(String(text ?? ""));
+    if (!list.length) throw new HttpError(400, "Не поняла, какие продукты есть");
+    const { matched } = await markHave(env, list);
+    return json({ products: list, matched: matched.map((i) => i.name) });
+  }
+
+  // ---------- готовые рецепты для старта ----------
+  if (path === "/starter" && method === "GET") {
+    const have = new Set((await repo.listRecipes()).map((r) => r.title.toLowerCase()));
+    return json(STARTER.map((r) => ({ key: r.key, title: r.title, meal_types: r.meal_types, minutes: r.minutes, added: have.has(r.title.toLowerCase()) })));
+  }
+  if (path === "/starter" && method === "POST") {
+    const { keys } = await body<{ keys: string[] }>();
+    const have = new Set((await repo.listRecipes()).map((r) => r.title.toLowerCase()));
+    const picked = STARTER.filter((r) => keys?.includes(r.key) && !have.has(r.title.toLowerCase()));
+    for (const { key, ...r } of picked) await repo.createRecipe({ ...r, source: "starter" }, userId);
+    return json({ added: picked.length });
   }
 
   // ---------- подсказки ----------

@@ -3,11 +3,12 @@ import "./home.js";
 import { renderHome } from "./home.js";
 import { renderBalance, renderMore, showOnboarding } from "./more.js";
 import { openRecipe, renderRecipes } from "./recipes.js";
+import { renderSetup } from "./setup.js";
 import { renderShop } from "./shop.js";
-import { $, $$, api, bus, guard, inTelegram, loadRecipes, state, tg } from "./ui.js";
+import { $, $$, api, bus, guard, inTelegram, loadRecipes, state, store, tg } from "./ui.js";
 import { renderWeek } from "./week.js";
 
-const SCREENS = { home: renderHome, week: renderWeek, recipes: renderRecipes, shop: renderShop, more: renderMore, balance: renderBalance };
+const SCREENS = { home: renderHome, week: renderWeek, recipes: renderRecipes, shop: renderShop, more: renderMore, balance: renderBalance, setup: renderSetup };
 // Какая кнопка внизу подсвечивается для экрана
 const NAV_OF = { balance: "more" };
 
@@ -36,6 +37,10 @@ async function render() {
 
 function go(tab) {
   if (!SCREENS[tab]) tab = "home";
+  if (tab !== "setup") {
+    state.setupActive = false;
+    document.body.classList.remove("setup-mode");
+  }
   const changed = state.tab !== tab;
   state.tab = tab;
   if (changed) window.scrollTo(0, 0);
@@ -62,9 +67,14 @@ document.addEventListener("click", (e) => {
     return;
   }
   const params = new URLSearchParams(location.search);
+  const recipeId = Number(params.get("recipe"));
+  // Первый запуск — пошаговый мастер (кнопка из бота может сразу открыть шаг «Меню»).
+  if (!state.config.settings.setup_done && !recipeId) {
+    if (params.get("setup") === "plan") store.set("setupStep", 2);
+    return go("setup");
+  }
   const tab = params.get("tab");
   go({ today: "home", week: "week", shop: "shop", balance: "balance", recipes: "recipes" }[tab] || "home");
-  const recipeId = Number(params.get("recipe"));
   if (recipeId) openRecipe(recipeId);
   else showOnboarding();
 })();

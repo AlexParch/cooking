@@ -40,8 +40,8 @@ describe("buildShoppingList", () => {
       new Map([soup, stew].map((r) => [r.id, r])),
       5,
     );
-    expect(list.find((i) => i.name === "Морковь")?.amount).toBe("3,5 шт");
-    expect(list.find((i) => i.name === "Чечевица")).toMatchObject({ amount: "250 г", aisle: "Крупы и бобовые" });
+    expect(list.find((i) => i.name === "Морковь")?.amount).toBe("4 шт");
+    expect(list.find((i) => i.name === "Чечевица")).toMatchObject({ amount: "250 г", aisle: "Крупы, мука, бобовые" });
     expect(list.find((i) => i.name === "Соль")).toBeUndefined();
     expect(list[0].aisle).toBe("Овощи и зелень");
   });
@@ -120,5 +120,14 @@ describe("склейка форм слова", () => {
     const list = buildShoppingList([plan({ recipe_id: a.id }), plan({ recipe_id: b.id, meal_type: "dinner" })], new Map([a, b].map((r) => [r.id, r])), 5);
     expect(list).toHaveLength(1);
     expect(list[0].amount).toBe("4 шт");
+  });
+});
+
+describe("что есть дома", () => {
+  it("разбирает сказанный список продуктов", async () => {
+    const { splitProducts, productMatcher } = await import("../src/planner");
+    expect(splitProducts("У меня дома есть гречка, яйца и морковь. Ещё молоко")).toEqual(["гречка", "яйца", "морковь", "молоко"]);
+    const has = productMatcher(splitProducts("гречка, яйца и морковь"));
+    expect(["Гречка", "Яйцо", "Морковь", "Нут сухой", "Филе индейки"].filter(has)).toEqual(["Гречка", "Яйцо", "Морковь"]);
   });
 });

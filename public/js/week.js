@@ -74,7 +74,7 @@ export async function renderWeek(view) {
   });
 }
 
-function openSlot(date, mealType, item) {
+export function openSlot(date, mealType, item) {
   const r = item?.recipe_id ? recipeById(item.recipe_id) : null;
   const title = `${MEAL_ICONS[mealType]} ${esc(mealName(mealType))}, ${esc(shortDay(date).toLowerCase())}`;
   if (!item) return openPickForPlan(date, mealType, title);

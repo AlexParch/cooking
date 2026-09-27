@@ -2,8 +2,8 @@ import { aiEnabled, analyzePhoto, importFromUrl, parseRecipe, transcribe, voiceE
 import { Repo, type Recipe, type RecipeInput } from "./db";
 import { allowedIds, currentMeal, today, type Env } from "./env";
 import { addDays, balanceSummary, categoryByKey, MEAL_TYPES, type MealType } from "./nutrition";
-import { AISLE_ORDER } from "./planner";
-import { dayBrief, fillPlan, fromProducts, getBalance, getIdea, getSuggestions, mealName, shoppingFromPlan } from "./service";
+import { AISLE_ORDER, splitProducts } from "./planner";
+import { dayBrief, fillPlan, fromProducts, getBalance, getIdea, getSuggestions, markHave, mealName, sendShoppingList, shoppingFromPlan, shoppingText } from "./service";
 import { escapeHtml as h, Telegram } from "./telegram";
 
 interface PhotoSize {
@@ -132,9 +132,17 @@ export async function handleUpdate(env: Env, update: Update, origin: string): Pr
   if (update.callback_query) return handleCallback(ctx, update.callback_query);
   const msg = update.message!;
 
+  // Бот ждёт список «что есть дома»?
+  const chatState = isPrivate ? await repo.getChatState(from.id) : null;
+
   // 🎙 Голосовое / аудио / кружок
   const audio = msg.voice ?? msg.audio ?? msg.video_note;
-  if (audio) return handleVoice(ctx, audio.file_id, msg.audio?.file_name ?? (msg.video_note ? "note.mp4" : "voice.ogg"), msg.audio?.mime_type ?? (msg.video_note ? "video/mp4" : "audio/ogg"));
+  if (audio) {
+    const filename = msg.audio?.file_name ?? (msg.video_note ? "note.mp4" : "voice.ogg");
+    const mime = msg.audio?.mime_type ?? (msg.video_note ? "video/mp4" : "audio/ogg");
+    if (chatState === "have") return handleHaveVoice(ctx, audio.file_id, filename, mime);
+    return handleVoice(ctx, audio.file_id, filename, mime);
+  }
 
   // 📷 Фото (или картинка файлом)
   const photo = msg.photo?.length ? msg.photo[msg.photo.length - 1] : null;
@@ -146,9 +154,19 @@ export async function handleUpdate(env: Env, update: Update, origin: string): Pr
   const [command, ...rest] = text.split(/\s+/);
   const arg = rest.join(" ");
   const cmd = command.startsWith("/") ? command.slice(1).split("@")[0].toLowerCase() : "";
+  if (cmd && chatState) await repo.setChatState(from.id, null);
+  if (!cmd && chatState === "have" && !/https?:\/\//.test(text)) return handleHave(ctx, text);
 
   switch (cmd) {
-    case "start":
+    case "start": {
+      const settings = await repo.getSettings();
+      if (!settings.setup_done) {
+        await tg.send(chatId, WELCOME(from.first_name), { reply_markup: { inline_keyboard: [[openApp({}, "🚀 Начать настройку")]] } });
+        return;
+      }
+      await tg.send(chatId, HELP, { reply_markup: { inline_keyboard: [[openApp()]] } });
+      return;
+    }
     case "help":
       await tg.send(chatId, HELP, { reply_markup: { inline_keyboard: [[openApp()]] } });
       return;
@@ -219,6 +237,67 @@ async function saveAndReply(ctx: Ctx, input: RecipeInput, progressId: number) {
   await ctx.tg.edit(ctx.chatId, progressId, `✅ Сохранила рецепт в книгу\n\n${formatRecipe(recipe)}`, {
     reply_markup: {
       inline_keyboard: [[ctx.openApp({ recipe: String(recipe.id) }, "✏️ Открыть / поправить")], [{ text: "🗑 Удалить", callback_data: `del:${recipe.id}` }]],
+    },
+  });
+  // Пока идёт первая настройка — подсказываем, сколько ещё добавить.
+  const settings = await ctx.repo.getSettings();
+  if (!settings.setup_done) {
+    const count = (await ctx.repo.listRecipes()).length;
+    if (count < 5)
+      await ctx.tg.send(ctx.chatId, `📖 В книге уже ${count} ${plural(count, "рецепт", "рецепта", "рецептов")}. Надиктуйте ещё ${5 - count} — и я составлю меню на неделю.`);
+    else
+      await ctx.tg.send(ctx.chatId, `📖 Уже ${count} ${plural(count, "рецепт", "рецепта", "рецептов")} — можно составлять меню! Добавляйте ещё или нажмите кнопку.`, {
+        reply_markup: { inline_keyboard: [[ctx.openApp({ setup: "plan" }, "🗓 Составить первое меню")]] },
+      });
+  }
+}
+
+export const plural = (n: number, one: string, few: string, many: string) => {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  return m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many;
+};
+
+const WELCOME = (name?: string) => `Привет${name ? `, ${h(name)}` : ""}! 👋 Я помогу с готовкой: буду хранить ваши рецепты, составлять меню на неделю и список покупок.
+
+<b>Давайте настроимся — это минут 10:</b>
+
+1️⃣ <b>Надиктуйте свои рецепты.</b> Прямо сюда голосовыми, по одному блюду: как называется, что кладёте и как готовите. Лучше 5–10 блюд, которые вы часто готовите: завтраки, обеды, полдники, ужины.
+2️⃣ Я <b>составлю меню</b> на неделю.
+3️⃣ Вы <b>отметите, что уже есть дома</b>, — а я соберу список того, что докупить.
+
+Удобнее всего по шагам в приложении 👇 Но можно начать прямо сейчас — просто отправьте голосовое с первым рецептом 🎙`;
+
+// ---------- «что уже есть дома» ----------
+
+async function handleHaveVoice(ctx: Ctx, fileId: string, filename: string, mime: string) {
+  const { env, tg, chatId } = ctx;
+  if (!voiceEnabled(env)) return void (await tg.send(chatId, "Распознавание голоса не подключено — напишите текстом, пожалуйста."));
+  const progress = await tg.send(chatId, "🎙 Слушаю…");
+  try {
+    const text = await transcribe(env, await tg.downloadFile(fileId), filename, mime);
+    await tg.edit(chatId, progress.message_id, `🎙 <i>${h(text || "…")}</i>`);
+    if (text) await handleHave(ctx, text);
+  } catch (e) {
+    await tg.edit(chatId, progress.message_id, errText(e));
+  }
+}
+
+async function handleHave(ctx: Ctx, text: string) {
+  const { env, tg, chatId } = ctx;
+  const products = splitProducts(text);
+  const { matched, left } = await markHave(env, products);
+  const lines = [];
+  if (matched.length) lines.push(`✅ Отметила, что есть дома: ${h(matched.map((i) => i.name.toLowerCase()).join(", "))}`);
+  else lines.push(`🤔 Не нашла в списке: ${h(products.join(", "))}`);
+  lines.push("");
+  lines.push(left.length ? shoppingText(left, `🛒 <b>Осталось купить (${left.length}):</b>`) : "🎉 Всё есть — ничего покупать не нужно!");
+  if (left.length) lines.push("", "Что-то ещё есть? Напишите или скажите. Если всё — нажмите «Готово».");
+  await tg.send(chatId, lines.join("\n").slice(0, 4000), {
+    reply_markup: {
+      inline_keyboard: left.length
+        ? [[{ text: "✅ Готово", callback_data: "have:done" }], [{ text: "📤 Отправить список всей семье", callback_data: "shop:family" }]]
+        : [[{ text: "👍 Отлично", callback_data: "have:done" }]],
     },
   });
 }
@@ -366,7 +445,15 @@ async function sendShopping(ctx: Ctx) {
     lines.push("", `<b>${aisle}</b>`);
     for (const i of group) lines.push(`▫️ ${h(i.name)}${i.amount ? ` — ${h(i.amount)}` : ""}`);
   }
-  await tg.send(chatId, lines.join("\n").slice(0, 4000), { reply_markup: { inline_keyboard: [[ctx.openApp({ tab: "shop" }, "✅ Отмечать купленное")]] } });
+  await tg.send(chatId, lines.join("\n").slice(0, 4000), {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🏠 Что-то уже есть дома? Отметить", callback_data: "have:start" }],
+        [{ text: "📤 Отправить всей семье", callback_data: "shop:family" }],
+        [ctx.openApp({ tab: "shop" }, "✅ Отмечать купленное")],
+      ],
+    },
+  });
 }
 
 async function sendBalance(ctx: Ctx) {
@@ -461,12 +548,40 @@ async function handleCallback(ctx: Ctx, q: CallbackQuery) {
       await answer("Составляю меню…");
       return sendWeek(ctx, true);
     case "shop": {
+      if (a === "family") {
+        try {
+          const n = await sendShoppingList(env, ctx.userId, true);
+          await answer(n > 1 ? "Отправила всей семье 📤" : "Отправила. Остальные получат, когда напишут боту /start");
+        } catch (e) {
+          await answer(String((e as Error).message));
+        }
+        return;
+      }
       await answer("Собираю список…");
       const start = today(env);
       const res = await shoppingFromPlan(env, start, addDays(start, 6));
       if (!res.dishes) return void (await tg.send(chatId, "Сначала нужно меню на неделю: /week"));
       return sendShopping(ctx);
     }
+    case "have":
+      if (a === "start") {
+        await repo.setChatState(ctx.userId, "have");
+        await answer();
+        await tg.send(
+          chatId,
+          "🏠 Скажите голосом или напишите, <b>что из списка уже есть дома</b>.\nНапример: <i>«гречка, яйца, морковь и молоко»</i>\n\nЯ уберу это из покупок.",
+        );
+      } else {
+        await repo.setChatState(ctx.userId, null);
+        // Список покупок после «что есть дома» — это конец первой настройки.
+        await repo.updateSettings({ setup_done: true });
+        await answer("Готово!");
+        await tg.call("editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } });
+        await tg.send(chatId, "👍 Список покупок готов. Он всегда под рукой: /shop или вкладка «Покупки» в приложении.", {
+          reply_markup: { inline_keyboard: [[{ text: "📤 Отправить всей семье", callback_data: "shop:family" }]] },
+        });
+      }
+      return;
     default:
       await answer();
   }
