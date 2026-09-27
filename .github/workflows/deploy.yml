@@ -1,0 +1,55 @@
+name: Test & Deploy
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  deploy:
+    # Выкладываем только из main (или вручную: Actions → Test & Deploy → Run workflow)
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ubuntu-latest
+    concurrency: deploy
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: База данных D1
+        run: node scripts/ensure-d1.mjs
+      - name: Миграции
+        run: npx wrangler d1 migrations apply cooking --remote
+      - name: Деплой
+        id: deploy
+        run: |
+          npx wrangler deploy | tee deploy.log
+          echo "url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -1)" >> "$GITHUB_OUTPUT"
+      - name: Секреты
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          ALLOWED_USER_IDS: ${{ secrets.ALLOWED_USER_IDS }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: node scripts/secrets.mjs > secrets.json && npx wrangler secret bulk secrets.json && rm secrets.json
+      - name: Подключение бота к Telegram
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          echo "Адрес приложения: ${{ steps.deploy.outputs.url }}"
+          sleep 5
+          curl -fsS "${{ steps.deploy.outputs.url }}/setup?key=${WEBHOOK_SECRET}"

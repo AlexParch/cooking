@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Наша кухня</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main id="view"></main>
+  <nav class="tabs">
+    <button data-tab="today"><span>🍽</span>Сегодня</button>
+    <button data-tab="recipes"><span>📖</span>Рецепты</button>
+    <button data-tab="balance"><span>📊</span>Баланс</button>
+    <button data-tab="ideas"><span>✨</span>Идеи</button>
+  </nav>
+  <div id="sheet" class="sheet hidden"><div class="sheet-body" id="sheet-body"></div></div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

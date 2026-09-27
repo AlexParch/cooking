@@ -1,0 +1,32 @@
+name = "cooking"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/telegram/*", "/setup"]
+
+[ai]
+binding = "AI"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cooking"
+# Заполняется автоматически в GitHub Actions (scripts/ensure-d1.mjs).
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[vars]
+# Часовой пояс семьи — для «сегодня» в боте.
+TZ = "Europe/Moscow"
+# Модель Claude для разбора рецептов и идей.
+ANTHROPIC_MODEL = "claude-opus-5"
+
+# Секреты (задаются через GitHub Secrets → wrangler secret):
+#   TELEGRAM_BOT_TOKEN  — токен от @BotFather
+#   WEBHOOK_SECRET      — любая случайная строка
+#   ALLOWED_USER_IDS    — Telegram ID членов семьи через запятую
+#   ANTHROPIC_API_KEY   — ключ Claude API (необязательно, но без него нет ИИ)

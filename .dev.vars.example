@@ -1,0 +1,7 @@
+# Скопируйте в .dev.vars для локального запуска (npm run dev)
+TELEGRAM_BOT_TOKEN=123:abc
+WEBHOOK_SECRET=local-secret
+ALLOWED_USER_IDS=1
+ANTHROPIC_API_KEY=
+# Разрешает открывать WebApp в обычном браузере без Telegram (только локально!)
+DEV_AUTH=1
