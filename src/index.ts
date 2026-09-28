@@ -1,7 +1,7 @@
 import { aiEnabled, analyzePhoto, importFromUrl, parseRecipe, transcribe, voiceEnabled } from "./ai";
 import { handleUpdate, type Update } from "./bot";
 import { HttpError, Repo, type RecipeInput, type Settings } from "./db";
-import { allowedIds, today, type Env } from "./env";
+import { allowedIds, allEnvs, envFor, today, type Env } from "./env";
 import { runReminders } from "./notify";
 import { addDays, CATEGORIES, MEAL_TYPES } from "./nutrition";
 import { aisleFor, AISLE_ORDER, splitProducts } from "./planner";
@@ -28,17 +28,21 @@ export default {
     }
   },
 
-  // Раз в час: утреннее меню и вечерние напоминания/оценки.
+  // Раз в час: утреннее меню и вечерние напоминания/оценки — для каждой базы отдельно.
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     if (env.TELEGRAM_API_BASE) Telegram.base = env.TELEGRAM_API_BASE;
-    const origin = await env.DB.prepare("SELECT value FROM settings WHERE key = 'app_origin'").first<string>("value");
-    ctx.waitUntil(runReminders(env, new Date(controller.scheduledTime), origin ?? "").then((s) => s.length && console.log("sent", s)));
+    for (const e of allEnvs(env)) {
+      const origin = await e.DB.prepare("SELECT value FROM settings WHERE key = 'app_origin'").first<string>("value");
+      ctx.waitUntil(runReminders(e, new Date(controller.scheduledTime), origin ?? "").then((s) => s.length && console.log("sent", s)));
+    }
   },
 } satisfies ExportedHandler<Env>;
 
 async function webhook(request: Request, env: Env, origin: string): Promise<Response> {
   if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) return new Response("forbidden", { status: 403 });
   const update = (await request.json()) as Update;
+  // Дальше всё — в базе того, кто написал.
+  env = envFor(env, (update.message?.from ?? update.callback_query?.from)?.id);
   // Telegram может прислать тот же update повторно — обрабатываем один раз.
   const fresh = await env.DB.prepare("INSERT OR IGNORE INTO updates (update_id) VALUES (?)").bind(update.update_id).run();
   if (!fresh.meta.changes) return new Response("ok");
@@ -78,9 +82,10 @@ async function setup(env: Env, url: URL): Promise<Response> {
     ],
   });
   await tg.call("setChatMenuButton", { menu_button: { type: "web_app", text: "Кухня", web_app: { url: `${url.origin}/` } } });
-  await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('app_origin', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-    .bind(url.origin)
-    .run();
+  for (const e of allEnvs(env))
+    await e.DB.prepare("INSERT INTO settings (key, value) VALUES ('app_origin', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .bind(url.origin)
+      .run();
   const me = await tg.call<{ username: string }>("getMe");
   return json({ ok: true, bot: `@${me.username}`, webhook: `${url.origin}/telegram/webhook`, ai: aiEnabled(env), voice: voiceEnabled(env), allowed: [...allowedIds(env)] });
 }
@@ -110,6 +115,7 @@ async function fileFromForm(request: Request, field: string, maxMb: number): Pro
 async function api(request: Request, env: Env, url: URL): Promise<Response> {
   const user = await authUser(request, env);
   const userId = user.id;
+  env = envFor(env, userId);
   const repo = new Repo(env.DB);
   const path = url.pathname.replace(/^\/api/, "");
   const method = request.method;

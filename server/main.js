@@ -14,14 +14,29 @@ const PORT = Number(process.env.PORT || 8080);
 const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/$/, "");
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
-// ---------- база: SQLite с интерфейсом как у Cloudflare D1 ----------
+// ---------- базы: SQLite с интерфейсом как у Cloudflare D1 ----------
+// Основная база семьи — data/cooking.db. Отдельные базы для отдельных людей задаются в
+// FAMILY_DBS: «52087650:test» — пользователь 52087650 работает со своей data/test.db.
 mkdirSync(DATA_DIR, { recursive: true });
-const sqlite = new DatabaseSync(join(DATA_DIR, "cooking.db"));
-sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+const DB_BY_USER = new Map(
+  (process.env.FAMILY_DBS || "")
+    .split(/[,;\s]+/)
+    .filter(Boolean)
+    .map((pair) => {
+      const [id, name] = pair.split(":");
+      if (!Number(id) || !/^[a-z0-9_-]+$/i.test(name || "") || name === "cooking") throw new Error(`FAMILY_DBS: неверная пара «${pair}» (нужно id:имя)`);
+      return [Number(id), name];
+    }),
+);
+const bases = new Map(); // имя → { name, sqlite, db }
+for (const name of ["cooking", ...new Set(DB_BY_USER.values())]) {
+  const sqlite = new DatabaseSync(join(DATA_DIR, `${name}.db`));
+  sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+  bases.set(name, { name, sqlite, db: createD1(sqlite) });
+}
+const DB = bases.get("cooking").db;
 
-const DB = createD1(sqlite);
-
-function migrate() {
+function migrate(sqlite) {
   sqlite.exec("CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))");
   const done = new Set(sqlite.prepare("SELECT name FROM _migrations").all().map((r) => r.name));
   const dir = join(ROOT, "migrations");
@@ -73,6 +88,8 @@ const env = {
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || "",
   WEBHOOK_SECRET: process.env.WEBHOOK_SECRET || "",
   ALLOWED_USER_IDS: process.env.ALLOWED_USER_IDS || "",
+  dbFor: (userId) => bases.get(DB_BY_USER.get(userId) ?? "cooking").db,
+  allDbs: () => [...bases.values()].map((b) => b.db),
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || undefined,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY || undefined,
   OPENAI_MODEL: process.env.OPENAI_MODEL || undefined,
@@ -126,14 +143,16 @@ function backup() {
   lastBackup = date;
   const dir = join(DATA_DIR, "backups");
   mkdirSync(dir, { recursive: true });
-  const file = join(dir, `cooking-${date}.db`);
-  if (!existsSync(file)) {
-    sqlite.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
-    log("бэкап базы", file);
+  for (const { name, sqlite } of bases.values()) {
+    const file = join(dir, `${name}-${date}.db`);
+    if (!existsSync(file)) {
+      sqlite.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+      log("бэкап базы", file);
+    }
+    // Храним две недели.
+    const files = readdirSync(dir).filter((f) => new RegExp(`^${name}-\\d{4}-\\d{2}-\\d{2}\\.db$`).test(f)).sort();
+    for (const old of files.slice(0, Math.max(0, files.length - 14))) rmSync(join(dir, old));
   }
-  // Храним две недели.
-  const files = readdirSync(dir).filter((f) => f.startsWith("cooking-")).sort();
-  for (const old of files.slice(0, Math.max(0, files.length - 14))) rmSync(join(dir, old));
 }
 
 function tick() {
@@ -169,9 +188,10 @@ async function connectTelegram(attempt = 1) {
   }
 }
 
-migrate();
+for (const { sqlite } of bases.values()) migrate(sqlite);
 server.listen(PORT, () => {
-  log(`Наша кухня запущена на порту ${PORT}. База: ${join(DATA_DIR, "cooking.db")}. Адрес: ${PUBLIC_URL || "(PUBLIC_URL не задан)"}`);
+  const who = [...DB_BY_USER].map(([id, name]) => `${id} → ${name}.db`).join(", ");
+  log(`Наша кухня запущена на порту ${PORT}. Базы: ${DATA_DIR}/cooking.db${who ? `, отдельные: ${who}` : ""}. Адрес: ${PUBLIC_URL || "(PUBLIC_URL не задан)"}`);
   setTimeout(connectTelegram, 3000);
   setInterval(tick, 60_000);
   setTimeout(tick, 10_000);
@@ -181,7 +201,7 @@ for (const sig of ["SIGTERM", "SIGINT"]) {
   process.on(sig, () => {
     log("остановка…");
     server.close(() => {
-      sqlite.close();
+      for (const { sqlite } of bases.values()) sqlite.close();
       process.exit(0);
     });
     setTimeout(() => process.exit(0), 5000).unref();

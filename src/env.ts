@@ -13,7 +13,20 @@ export interface Env {
   OPENAI_TRANSCRIBE_MODEL?: string;
   DEV_AUTH?: string;
   TELEGRAM_API_BASE?: string;
+  /**
+   * Свой сервер: у семей (и у тестового пользователя) раздельные базы.
+   * `dbFor` выбирает базу по Telegram ID, `allDbs` — все базы (напоминания, /setup).
+   * Нет — одна общая база `DB` (Cloudflare).
+   */
+  dbFor?: (userId: number) => D1Database;
+  allDbs?: () => D1Database[];
 }
+
+/** Окружение с базой этого пользователя. */
+export const envFor = (env: Env, userId: number | undefined): Env => (env.dbFor && userId ? { ...env, DB: env.dbFor(userId) } : env);
+
+/** Окружение для каждой базы (для напоминаний и настройки). */
+export const allEnvs = (env: Env): Env[] => (env.allDbs ? env.allDbs().map((DB) => ({ ...env, DB })) : [env]);
 
 export const allowedIds = (env: Env) =>
   new Set(
