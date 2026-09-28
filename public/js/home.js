@@ -18,12 +18,24 @@ export async function renderHome(view) {
 
   const slot = (k) => {
     const eaten = meals.filter((m) => m.meal_type === k);
-    const planned = brief.plan.find((p) => p.meal_type === k);
-    const plannedRecipe = planned?.recipe_id ? recipeById(planned.recipe_id) : null;
-    let body;
     // Кто в этот приём пищи ещё ничего не ел (если ели не все).
     const ateIds = eaten.some((m) => !m.eaters?.length) ? members().map((x) => x.id) : [...new Set(eaten.flatMap((m) => m.eaters || []))];
     const notYet = members().filter((x) => !ateIds.includes(x.id));
+    // Блюда из меню, которые ещё не отмечены (у членов семьи они могут быть разные).
+    const planned = brief.plan.filter(
+      (p) => p.meal_type === k && !eaten.some((m) => (p.recipe_id ? m.recipe_id === p.recipe_id : m.title === p.title)) && (!eaten.length || notYet.length),
+    );
+    const plannedHtml = planned
+      .map((p) => {
+        const r = p.recipe_id ? recipeById(p.recipe_id) : null;
+        return `<div class="slot-dish">${esc(p.title)}${p.leftovers ? ' <span class="badge">доедаем</span>' : ""}</div>${eatersBadge(p.eaters)}
+        <div class="slot-btns">
+          ${r?.steps.length && !p.leftovers ? `<button class="btn secondary" data-cook="${r.id}" data-servings="${p.eaters?.length || ""}">👩‍🍳 Готовить</button>` : r ? `<button class="btn secondary" data-open="${r.id}">📖 Рецепт</button>` : ""}
+          <button class="btn primary" data-eat-plan="${p.id}">✅ Съели</button>
+        </div>`;
+      })
+      .join("");
+    let body;
     if (eaten.length) {
       body = eaten
         .map(
@@ -37,16 +49,13 @@ export async function renderHome(view) {
           }`,
         )
         .join("");
-      if (hasFamily())
+      if (planned.length) body += plannedHtml;
+      else if (hasFamily())
         body += notYet.length
           ? `<button class="btn secondary block other-dish" data-eat-more="${k}" data-who-ids="${notYet.map((x) => x.id).join(",")}">＋ ${esc(notYet.map((x) => x.name).join(", "))} — что ели?</button>`
           : `<button class="link small" data-eat-more="${k}">＋ ещё блюдо</button>`;
-    } else if (planned) {
-      body = `<div class="slot-dish">${esc(planned.title)}${planned.leftovers ? ' <span class="badge">доедаем</span>' : ""}</div>
-        <div class="slot-btns">
-          ${plannedRecipe?.steps.length && !planned.leftovers ? `<button class="btn secondary" data-cook="${plannedRecipe.id}">👩‍🍳 Готовить</button>` : plannedRecipe ? `<button class="btn secondary" data-open="${plannedRecipe.id}">📖 Рецепт</button>` : ""}
-          <button class="btn primary" data-eat="${k}">✅ Съели</button>
-        </div>`;
+    } else if (planned.length) {
+      body = plannedHtml;
     } else {
       body = `<div class="slot-empty">ещё не выбрано</div><div class="slot-btns"><button class="btn secondary" data-eat="${k}">＋ Отметить, что ели</button></div>`;
     }
@@ -111,8 +120,17 @@ export async function renderHome(view) {
     }
     ${state.config.ai && !noRecipes ? `<button class="big-btn block" data-action="idea">✨ Придумай что-нибудь новенькое</button>` : ""}`;
 
-  $$("[data-eat]", view).forEach(
-    (b) => (b.onclick = () => openMarkEaten({ date, mealType: b.dataset.eat, planned: brief.plan.find((p) => p.meal_type === b.dataset.eat) })),
+  $$("[data-eat]", view).forEach((b) => (b.onclick = () => openMarkEaten({ date, mealType: b.dataset.eat })));
+  $$("[data-eat-plan]", view).forEach(
+    (b) =>
+      (b.onclick = () => {
+        const p = brief.plan.find((x) => x.id === Number(b.dataset.eatPlan));
+        // Кто-то уже поел — по умолчанию отмечаем только тех, кто ещё не ел.
+        const ate = meals.filter((m) => m.meal_type === p.meal_type);
+        const ateIds = new Set(ate.flatMap((m) => m.eaters || []));
+        const who = (p.eaters?.length ? p.eaters : members().map((x) => x.id)).filter((id) => !ateIds.has(id));
+        openMarkEaten({ date, mealType: p.meal_type, planned: p, whoDefault: ate.length || p.eaters?.length ? who : null });
+      }),
   );
   $$("[data-eat-more]", view).forEach(
     (b) =>
@@ -123,7 +141,9 @@ export async function renderHome(view) {
     state.balanceMember = id;
     bus.go("balance");
   });
-  $$("[data-cook]", view).forEach((b) => (b.onclick = () => startCooking(recipeById(Number(b.dataset.cook)), state.config.settings.family_size)));
+  $$("[data-cook]", view).forEach(
+    (b) => (b.onclick = () => startCooking(recipeById(Number(b.dataset.cook)), Number(b.dataset.servings) || state.config.settings.family_size)),
+  );
   $$("[data-open]", view).forEach((b) => (b.onclick = () => openRecipe(Number(b.dataset.open))));
   $$("[data-rate]", view).forEach(
     (b) =>

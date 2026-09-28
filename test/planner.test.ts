@@ -9,7 +9,7 @@ const recipe = (p: Partial<Recipe> & { title: string }): Recipe => ({
   id: nextId++, meal_types: [], categories: [], ingredients: [], steps: [], notes: "", warnings: [], minutes: null, servings: null,
   prep_ahead: "", prep_hours: null, source: "manual", source_url: null, likes: 0, dislikes: 0, created_by: null, created_at: "", updated_at: "", ...p,
 });
-const plan = (p: Partial<PlanItem> & { recipe_id: number }): PlanItem => ({ id: nextId++, date: "2026-09-28", meal_type: "lunch", title: "", leftovers: false, ...p });
+const plan = (p: Partial<PlanItem> & { recipe_id: number }): PlanItem => ({ id: nextId++, date: "2026-09-28", meal_type: "lunch", title: "", leftovers: false, eaters: null, ...p });
 
 describe("amounts", () => {
   it("пересчитывает количества", () => {
@@ -44,6 +44,17 @@ describe("buildShoppingList", () => {
     expect(list.find((i) => i.name === "Чечевица")).toMatchObject({ amount: "250 г", aisle: "Крупы, мука, бобовые" });
     expect(list.find((i) => i.name === "Соль")).toBeUndefined();
     expect(list[0].aisle).toBe("Овощи и зелень");
+  });
+  it("блюдо для части семьи — на столько порций, сколько едоков", () => {
+    const soup = recipe({ title: "Суп", servings: 4, ingredients: [{ name: "Чечевица", amount: "200 г" }] });
+    const kids = recipe({ title: "Каша", servings: 1, ingredients: [{ name: "Гречка", amount: "50 г" }] });
+    const list = buildShoppingList(
+      [plan({ recipe_id: soup.id, eaters: [1, 2] }), plan({ recipe_id: kids.id, eaters: [3, 4, 5] })],
+      new Map([soup, kids].map((r) => [r.id, r])),
+      5,
+    );
+    expect(list.find((i) => i.name === "Чечевица")?.amount).toBe("100 г");
+    expect(list.find((i) => i.name === "Гречка")?.amount).toBe("150 г");
   });
   it("определяет отдел", () => {
     expect(aisleFor("Филе индейки")).toBe("Мясо и птица");

@@ -1,5 +1,5 @@
 import { aiEnabled, analyzePhoto, importFromUrl, parseRecipe, transcribe, voiceEnabled } from "./ai";
-import { Repo, type Recipe, type RecipeInput } from "./db";
+import { Repo, type Member, type PlanItem, type Recipe, type RecipeInput } from "./db";
 import { allowedIds, currentMeal, today, type Env } from "./env";
 import { addDays, balanceSummary, categoryByKey, MEAL_TYPES, type MealType } from "./nutrition";
 import { AISLE_ORDER, splitProducts } from "./planner";
@@ -89,13 +89,24 @@ export function formatRecipe(r: RecipeInput & { id?: number }): string {
   return text.length > 4000 ? `${text.slice(0, 3990)}…` : text;
 }
 
+/** «Котлеты <i>(Маша, Миша)</i>» — если блюдо не для всей семьи. */
+function planDish(p: PlanItem, members: Member[]): string {
+  const who = p.eaters ? members.filter((m) => p.eaters!.includes(m.id)).map((m) => m.name) : [];
+  return `${h(p.title)}${p.leftovers ? " <i>(доедаем)</i>" : ""}${who.length ? ` <i>— ${h(who.join(", "))}</i>` : ""}`;
+}
+
+/** Блюда приёма пищи: одно — в строку, разные для членов семьи — каждое с новой строки. */
+function planDishes(items: PlanItem[], members: Member[]): string {
+  return items.length > 1 ? items.map((p) => `\n   • ${planDish(p, members)}`).join("") : planDish(items[0], members);
+}
+
 /** Текст «меню на день» для утреннего сообщения и /today. */
 export function formatDay(brief: Awaited<ReturnType<typeof dayBrief>>, eaten: { meal_type: string; title: string }[] = []): string {
   const lines: string[] = [];
   for (const k of Object.keys(MEAL_TYPES)) {
-    const p = brief.plan.find((x) => x.meal_type === k);
+    const items = brief.plan.filter((x) => x.meal_type === k);
     const done = eaten.filter((m) => m.meal_type === k).map((m) => m.title);
-    const what = done.length ? `✅ ${done.map(h).join(", ")}` : p ? `${h(p.title)}${p.leftovers ? " <i>(доедаем)</i>" : ""}` : "<i>не выбрано</i>";
+    const what = done.length ? `✅ ${done.map(h).join(", ")}` : items.length ? planDishes(items, brief.members) : "<i>не выбрано</i>";
     lines.push(`<b>${mealName(k)}:</b> ${what}`);
   }
   if (brief.prepToday.length) {
@@ -372,9 +383,10 @@ async function sendToday(ctx: Ctx) {
   const [brief, eaten] = await Promise.all([dayBrief(env, date), repo.listMeals(date, date)]);
   const buttons: Button[][] = [];
   const now = currentMeal(env);
-  const nowPlan = brief.plan.find((p) => p.meal_type === now);
-  if (nowPlan?.recipe_id && !eaten.some((m) => m.meal_type === now))
-    buttons.push([{ text: `✅ ${mealName(now)} съели: ${nowPlan.title}`.slice(0, 60), callback_data: `ate:${nowPlan.recipe_id}:${now}` }]);
+  // Кнопка на каждое блюдо: если у членов семьи разные блюда, отметится, что ели именно они.
+  if (!eaten.some((m) => m.meal_type === now))
+    for (const p of brief.plan.filter((x) => x.meal_type === now && x.recipe_id))
+      buttons.push([{ text: `✅ ${mealName(now)} съели: ${p.title}`.slice(0, 60), callback_data: `ateplan:${p.id}` }]);
   if (!brief.plan.length) buttons.push([{ text: "🗓 Составить меню на неделю", callback_data: "plan:week" }]);
   buttons.push([ctx.openApp({}, "📱 Открыть «Сегодня»")]);
   await tg.send(chatId, `<b>🍽 Сегодня</b>\n\n${formatDay(brief, eaten)}`, { reply_markup: { inline_keyboard: buttons } });
@@ -403,7 +415,7 @@ async function sendSuggestions(ctx: Ctx, arg = "") {
 async function sendWeek(ctx: Ctx, fill = false) {
   const { env, tg, chatId, repo } = ctx;
   const start = today(env);
-  const plan = fill ? await fillPlan(env, start, 7) : await repo.listPlan(start, addDays(start, 6));
+  const [plan, members] = await Promise.all([fill ? fillPlan(env, start, 7) : repo.listPlan(start, addDays(start, 6)), repo.listMembers()]);
   if (!plan.length) {
     await tg.send(chatId, "Меню на неделю ещё нет. Составить? Я подберу блюда из ваших рецептов так, чтобы всё было разнообразно.", {
       reply_markup: { inline_keyboard: [[{ text: "🗓 Да, составь меню", callback_data: "plan:week" }]] },
@@ -418,8 +430,8 @@ async function sendWeek(ctx: Ctx, fill = false) {
     const label = new Date(`${d}T12:00:00Z`).toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" });
     lines.push("", `<b>${i === 0 ? "Сегодня" : i === 1 ? "Завтра" : label}</b>`);
     for (const k of Object.keys(MEAL_TYPES)) {
-      const p = day.find((x) => x.meal_type === k);
-      if (p) lines.push(`${mealName(k)}: ${h(p.title)}${p.leftovers ? " <i>(доедаем)</i>" : ""}`);
+      const items = day.filter((x) => x.meal_type === k);
+      if (items.length) lines.push(`${mealName(k)}: ${planDishes(items, members)}`);
     }
   }
   await tg.send(chatId, lines.join("\n").slice(0, 4000), {
@@ -505,6 +517,14 @@ async function handleCallback(ctx: Ctx, q: CallbackQuery) {
       const meal = await repo.addMeal({ date: today(env), meal_type: b, recipe_id: Number(a) }, ctx.userId);
       await answer(`Отметила: ${mealName(b)} — ${meal.title}`);
       await tg.send(chatId, `✅ ${mealName(b)}: <b>${h(meal.title)}</b> — отмечено. Приятного аппетита!`);
+      return;
+    }
+    case "ateplan": {
+      const p = await repo.getPlanItem(Number(a));
+      if (!p) return void (await answer("Этого блюда уже нет в меню — откройте /today"));
+      const meal = await repo.addMeal({ date: p.date, meal_type: p.meal_type, recipe_id: p.recipe_id, title: p.title, eaters: p.eaters }, ctx.userId);
+      await answer(`Отметила: ${mealName(p.meal_type)} — ${meal.title}`);
+      await tg.send(chatId, `✅ ${mealName(p.meal_type)}: <b>${h(meal.title)}</b> — отмечено. Приятного аппетита!`);
       return;
     }
     case "rate": {

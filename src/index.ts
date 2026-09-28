@@ -203,7 +203,9 @@ async function api(request: Request, env: Env, url: URL): Promise<Response> {
     const input = await body<{ date: string; meal_type: string; recipe_id?: number; title?: string; categories?: string[]; leftovers?: boolean; eaters?: number[] }>();
     const meal = await repo.addMeal(input, userId);
     // «Приготовила с запасом» — ставим это же блюдо на завтра как «доедаем».
-    if (input.leftovers) await repo.setPlan({ date: addDays(meal.date, 1), meal_type: meal.meal_type, recipe_id: meal.recipe_id, title: meal.title, leftovers: true });
+    // Ели не все — доедают завтра тоже только они.
+    if (input.leftovers)
+      await repo.setPlan({ date: addDays(meal.date, 1), meal_type: meal.meal_type, recipe_id: meal.recipe_id, title: meal.title, leftovers: true, eaters: meal.eaters });
     return json(meal, 201);
   }
   if ((m = path.match(/^\/meals\/(\d+)$/)) && method === "DELETE") return await repo.deleteMeal(Number(m[1])), json({ ok: true });
@@ -226,9 +228,9 @@ async function api(request: Request, env: Env, url: URL): Promise<Response> {
     return json(await fillPlan(env, isDate(start) ? start : date, d, Boolean(replace)));
   }
   if (path === "/plan/swap" && method === "POST") {
-    const { date: d, meal_type } = await body<{ date: string; meal_type: string }>();
+    const { date: d, meal_type, id } = await body<{ date: string; meal_type: string; id?: number }>();
     if (!isDate(d)) throw new HttpError(400, "Неверная дата");
-    const item = await swapPlan(env, d, meal_type);
+    const item = await swapPlan(env, d, meal_type, id ? Number(id) : undefined);
     if (!item) throw new HttpError(404, "Нет других подходящих рецептов — добавьте ещё рецептов в книгу");
     return json(item);
   }
@@ -302,7 +304,7 @@ async function api(request: Request, env: Env, url: URL): Promise<Response> {
     if (method === "PUT") return json(await repo.saveMember({ ...(await body<object>()), id: Number(m[1]) }));
     if (method === "DELETE") return json(await repo.deleteMember(Number(m[1])));
   }
-  if (path === "/suggest" && method === "GET") return json(await getSuggestions(env, q("meal") || undefined, date, 8));
+  if (path === "/suggest" && method === "GET") return json(await getSuggestions(env, q("meal") || undefined, date, 8, Number(q("member")) || undefined));
   if (path === "/idea" && method === "POST") {
     needAi(env);
     const { meal, wish, products } = await body<{ meal?: string; wish?: string; products?: string[] }>();

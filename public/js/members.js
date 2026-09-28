@@ -6,30 +6,38 @@ export const hasFamily = () => members().length >= 2;
 
 const EMOJIS = ["👩", "👨", "👧", "👦", "🧒", "👶", "👵", "👴", "🙂"];
 
-/** Аватарки тех, кто ел (если ели не все). */
-export function eatersBadge(eaters) {
+/** Аватарки тех, кто ел (или для кого блюдо в меню), если это не вся семья. */
+export function eatersBadge(eaters, prefix = "") {
   if (!eaters?.length || !hasFamily()) return "";
   const who = members().filter((m) => eaters.includes(m.id));
-  return `<span class="eaters" title="${esc(who.map((m) => m.name).join(", "))}">${who.map((m) => m.emoji).join("")} <small>${esc(who.map((m) => m.name).join(", "))}</small></span>`;
+  if (!who.length) return "";
+  return `<span class="eaters" title="${esc(who.map((m) => m.name).join(", "))}">${prefix}${who.map((m) => m.emoji).join("")} <small>${esc(who.map((m) => m.name).join(", "))}</small></span>`;
+}
+
+/** Члены семьи, которым в этой клетке меню ещё не выбрано блюдо. */
+export function uncovered(items) {
+  if (!hasFamily() || !items.length || items.some((p) => !p.eaters?.length)) return [];
+  const ids = new Set(items.flatMap((p) => p.eaters));
+  return members().filter((m) => !ids.has(m.id));
 }
 
 // ---------- «Кто ел?» ----------
-export function whoAteHtml(selected = null) {
+export function whoAteHtml(selected = null, { title = "Кто ел?", note = "Снимите тех, кто ел что-то другое" } = {}) {
   if (!hasFamily()) return "";
   const sel = selected ?? members().map((m) => m.id);
-  return `<div class="who-ate"><h3>Кто ел?</h3>
-    <p class="muted small">Снимите тех, кто ел что-то другое</p>
+  return `<div class="who-ate"><h3>${title}</h3>
+    <p class="muted small">${note}</p>
     <div class="chips who" data-who>${members()
       .map((m) => `<button type="button" class="chip ${sel.includes(m.id) ? "on" : ""}" data-member="${m.id}">${m.emoji} ${esc(m.name)}</button>`)
       .join("")}</div></div>`;
 }
 
 /** Выбранные id; null — если выбраны все (так и хранится «вся семья»). */
-export function whoAteValue(root) {
+export function whoAteValue(root, empty = "Отметьте, кто ел") {
   const box = $("[data-who]", root);
   if (!box) return null;
   const ids = $$(".chip.on", box).map((c) => Number(c.dataset.member));
-  if (!ids.length) throw new Error("Отметьте, кто ел");
+  if (!ids.length) throw new Error(empty);
   return ids.length === members().length ? null : ids;
 }
 

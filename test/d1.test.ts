@@ -38,6 +38,20 @@ describe("SQLite вместо D1 (свой сервер)", () => {
     expect((await repo.getSettings()).family_size).toBe(2);
     const onlyKid = await repo.addMeal({ date: "2026-09-28", meal_type: "dinner", title: "Пельмени", eaters: [all[1].id] }, 1);
     expect(onlyKid.eaters).toEqual([all[1].id]);
+    // разные блюда в одной клетке меню
+    const [mom, kid] = all.map((x) => x.id);
+    const d = "2026-09-29";
+    const common = await repo.setPlan({ date: d, meal_type: "lunch", recipe_id: r.id });
+    expect(common.eaters).toBeNull();
+    const kidDish = await repo.setPlan({ date: d, meal_type: "lunch", title: "Пюре", eaters: [kid] });
+    let cell = await repo.listPlan(d, d);
+    expect(cell.map((x) => [x.title, x.eaters])).toEqual([["Суп", [mom]], ["Пюре", [kid]]]);
+    await repo.setPlan({ id: kidDish.id, date: d, meal_type: "lunch", title: "Котлеты" }); // замена — «для кого» остаётся
+    cell = await repo.listPlan(d, d);
+    expect(cell.map((x) => [x.title, x.eaters])).toEqual([["Суп", [mom]], ["Котлеты", [kid]]]);
+    await repo.setPlan({ id: common.id, date: d, meal_type: "lunch", recipe_id: r.id, eaters: null }); // снова всем одно
+    cell = await repo.listPlan(d, d);
+    expect(cell.map((x) => [x.title, x.eaters])).toEqual([["Суп", null]]);
     const everyone = await repo.addMeal({ date: "2026-09-28", meal_type: "dinner", title: "Салат", eaters: all.map((x) => x.id) }, 1);
     expect(everyone.eaters).toBeNull(); // все — хранится как «вся семья»
     expect(members).toHaveLength(1);

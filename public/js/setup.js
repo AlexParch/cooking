@@ -4,7 +4,7 @@ import { mountHaveList } from "./shop.js";
 import { $, $$, addDays, api, bus, busy, closeSheet, confirmDialog, esc, guard, haptic, loadRecipes, MEAL_ICONS, MEAL_ORDER, mealName, openSheet, replaceSheet, sheetHead, state, store, toast } from "./ui.js";
 import { ensureDefaultMembers, mountMembersEditor } from "./members.js";
 import { mountRecorder } from "./voice.js";
-import { openSlot } from "./week.js";
+import { bindPlanCells, planCellHtml } from "./week.js";
 
 const STEPS = ["Семья", "Рецепты", "Меню", "Что есть дома", "Готово"];
 const MIN_RECIPES = 5;
@@ -162,13 +162,9 @@ async function stepMenu(el) {
     <button class="big-btn block" id="reshuffle">🔄 Перемешать всё</button>
     ${days
       .map((d) => {
-        const items = plan.filter((p) => p.date === d);
         const label = new Date(`${d}T12:00:00Z`).toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" });
         return `<div class="card day compact"><h3>${d === state.config.today ? "Сегодня" : d === addDays(state.config.today, 1) ? "Завтра" : esc(label)}</h3>
-          ${MEAL_ORDER.map((k) => {
-            const p = items.find((x) => x.meal_type === k);
-            return `<button class="plan-row small ${p ? "" : "empty"}" data-slot="${d}|${k}"><span class="plan-meal">${MEAL_ICONS[k]}</span><span class="plan-dish">${p ? esc(p.title) : "＋ выбрать"}</span></button>`;
-          }).join("")}</div>`;
+          ${MEAL_ORDER.map((k) => planCellHtml(plan, d, k, true)).join("")}</div>`;
       })
       .join("")}
     ${plan.length ? "" : `<div class="notice warn">Не получилось составить меню — добавьте рецептов на предыдущем шаге.</div>`}
@@ -234,13 +230,7 @@ const STEP_BINDERS = [
     };
   },
   (view) => {
-    const plan = lastPlan;
-    $$("[data-slot]", view).forEach((b) => {
-      b.onclick = () => {
-        const [date, mt] = b.dataset.slot.split("|");
-        openSlot(date, mt, plan.find((p) => p.date === date && p.meal_type === mt));
-      };
-    });
+    bindPlanCells(view, lastPlan);
     $("#reshuffle", view).onclick = (e) =>
       guard(() =>
         busy(e.currentTarget, "Подбираю…", async () => {

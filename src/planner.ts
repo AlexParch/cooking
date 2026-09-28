@@ -124,14 +124,17 @@ export interface ShoppingDraft {
   aisle: string;
 }
 
-/** Собирает ингредиенты всех блюд меню, пересчитав под размер семьи и сложив одинаковые. */
+/**
+ * Собирает ингредиенты всех блюд меню, пересчитав под число едоков и сложив одинаковые.
+ * Блюдо для всей семьи — на `familySize` порций, блюдо для отдельных людей — на столько, сколько их.
+ */
 export function buildShoppingList(plan: PlanItem[], recipes: Map<number, Recipe>, familySize: number): ShoppingDraft[] {
   const acc = new Map<string, { name: string; qty: Map<string, number>; other: string[] }>();
   for (const p of plan) {
     if (p.leftovers || p.recipe_id == null) continue;
     const r = recipes.get(p.recipe_id);
     if (!r) continue;
-    const factor = servingsFactor(r.servings, familySize);
+    const factor = servingsFactor(r.servings, p.eaters?.length || familySize);
     for (const ing of r.ingredients) {
       const norm = normName(ing.name);
       if (!norm || PANTRY.test(norm)) continue;

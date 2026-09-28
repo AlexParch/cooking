@@ -58,6 +58,8 @@ export interface PlanItem {
   recipe_id: number | null;
   title: string;
   leftovers: boolean;
+  /** Для кого это блюдо: id из members. null — для всей семьи. */
+  eaters: number[] | null;
 }
 
 export interface ShoppingItem {
@@ -145,6 +147,7 @@ const rowToPlan = (r: Record<string, unknown>): PlanItem => ({
   recipe_id: num(r.recipe_id),
   title: r.title as string,
   leftovers: Boolean(r.leftovers),
+  eaters: r.eaters ? parse<number[]>(r.eaters, []) : null,
 });
 
 const rowToShopping = (r: Record<string, unknown>): ShoppingItem => ({
@@ -285,13 +288,7 @@ export class Repo {
     }
     if (!title) throw new HttpError(400, "Укажите блюдо");
     if (categories.length === 0) categories = detectCategories([title]);
-    // Кто ел: только существующие члены семьи; «все» храним как NULL.
-    let eaters: number[] | null = null;
-    if (Array.isArray(input.eaters) && input.eaters.length) {
-      const members = await this.listMembers();
-      const ids = [...new Set(input.eaters.map(Number))].filter((id) => members.some((m) => m.id === id));
-      eaters = ids.length && ids.length < members.length ? ids : null;
-    }
+    const eaters = await this.normEaters(input.eaters);
     const row = await this.db
       .prepare("INSERT INTO meals (date, meal_type, recipe_id, title, categories, eaters, created_by) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *")
       .bind(input.date, input.meal_type, recipeId, title.slice(0, 200), json(categories), eaters ? json(eaters) : null, userId)
@@ -326,6 +323,14 @@ export class Repo {
   }
 
   // ---------- члены семьи ----------
+  /** Только существующие члены семьи; «все» (или никто) — NULL, так и храним «вся семья». */
+  async normEaters(input: unknown): Promise<number[] | null> {
+    if (!Array.isArray(input) || !input.length) return null;
+    const members = await this.listMembers();
+    const ids = [...new Set(input.map(Number))].filter((id) => members.some((m) => m.id === id));
+    return ids.length && ids.length < members.length ? ids : null;
+  }
+
   async listMembers(): Promise<Member[]> {
     const { results } = await this.db.prepare("SELECT * FROM members ORDER BY sort, id").all();
     return results.map((r) => ({
@@ -370,11 +375,25 @@ export class Repo {
 
   // ---------- меню ----------
   async listPlan(from: string, to: string): Promise<PlanItem[]> {
-    const { results } = await this.db.prepare("SELECT * FROM plan WHERE date BETWEEN ? AND ? ORDER BY date").bind(from, to).all();
+    const { results } = await this.db.prepare("SELECT * FROM plan WHERE date BETWEEN ? AND ? ORDER BY date, id").bind(from, to).all();
     return results.map(rowToPlan);
   }
 
-  async setPlan(input: { date: string; meal_type: string; recipe_id?: number | null; title?: string; leftovers?: boolean }): Promise<PlanItem> {
+  /**
+   * Ставит блюдо в меню.
+   * - без `eaters` (или все) — одно блюдо на всю семью: остальные блюда клетки убираются;
+   * - с `eaters` — блюдо только для них: из других блюд этой клетки они убираются;
+   * - с `id` — меняем это блюдо (замена, «для кого»); без `eaters` люди остаются прежними.
+   */
+  async setPlan(input: {
+    id?: number;
+    date: string;
+    meal_type: string;
+    recipe_id?: number | null;
+    title?: string;
+    leftovers?: boolean;
+    eaters?: number[] | null;
+  }): Promise<PlanItem> {
     checkSlot(input.date, input.meal_type);
     let title = String(input.title ?? "").trim();
     let recipeId: number | null = null;
@@ -385,15 +404,44 @@ export class Repo {
       title ||= recipe.title;
     }
     if (!title) throw new HttpError(400, "Укажите блюдо");
-    const row = await this.db
-      .prepare(
-        `INSERT INTO plan (date, meal_type, recipe_id, title, leftovers) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(date, meal_type) DO UPDATE SET recipe_id = excluded.recipe_id, title = excluded.title, leftovers = excluded.leftovers
-         RETURNING *`,
-      )
-      .bind(input.date, input.meal_type, recipeId, title.slice(0, 200), input.leftovers ? 1 : 0)
-      .first();
-    return rowToPlan(row!);
+    const cell = await this.listPlanCell(input.date, input.meal_type);
+    const current = input.id ? cell.find((p) => p.id === Number(input.id)) : undefined;
+    if (input.id && !current) throw new HttpError(404, "Это блюдо уже убрали из меню — обновите экран");
+    const eaters = input.eaters === undefined && current ? current.eaters : await this.normEaters(input.eaters);
+
+    const stmts: D1PreparedStatement[] = [];
+    const others = cell.filter((p) => p !== current);
+    if (!eaters) {
+      if (others.length) stmts.push(this.db.prepare(`DELETE FROM plan WHERE id IN (${others.map(() => "?").join(",")})`).bind(...others.map((p) => p.id)));
+    } else {
+      // Эти люди теперь едят новое блюдо — у остальных блюд клетки их больше нет.
+      const all = (await this.listMembers()).map((m) => m.id);
+      for (const p of others) {
+        const left = (p.eaters ?? all).filter((id) => !eaters.includes(id));
+        if (!left.length) stmts.push(this.db.prepare("DELETE FROM plan WHERE id = ?").bind(p.id));
+        else if (left.length !== (p.eaters ?? all).length) stmts.push(this.db.prepare("UPDATE plan SET eaters = ? WHERE id = ?").bind(json(left), p.id));
+      }
+    }
+    const values = [recipeId, title.slice(0, 200), input.leftovers ? 1 : 0, eaters ? json(eaters) : null];
+    stmts.push(
+      current
+        ? this.db.prepare("UPDATE plan SET recipe_id = ?, title = ?, leftovers = ?, eaters = ? WHERE id = ? RETURNING *").bind(...values, current.id)
+        : this.db
+            .prepare("INSERT INTO plan (recipe_id, title, leftovers, eaters, date, meal_type) VALUES (?, ?, ?, ?, ?, ?) RETURNING *")
+            .bind(...values, input.date, input.meal_type),
+    );
+    const results = await this.db.batch(stmts);
+    return rowToPlan(results[results.length - 1].results[0] as Record<string, unknown>);
+  }
+
+  async getPlanItem(id: number): Promise<PlanItem | null> {
+    const row = await this.db.prepare("SELECT * FROM plan WHERE id = ?").bind(id).first();
+    return row ? rowToPlan(row) : null;
+  }
+
+  private async listPlanCell(date: string, mealType: string): Promise<PlanItem[]> {
+    const { results } = await this.db.prepare("SELECT * FROM plan WHERE date = ? AND meal_type = ? ORDER BY id").bind(date, mealType).all();
+    return results.map(rowToPlan);
   }
 
   async deletePlan(id: number): Promise<void> {

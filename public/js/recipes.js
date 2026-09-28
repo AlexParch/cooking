@@ -255,13 +255,15 @@ export function openAddToPlan(r) {
      ${chips(days.map((d) => ({ key: d, label: shortDay(d) })), [days[0]], "day", true)}
      <h3>Какой приём пищи?</h3>
      ${chips(mealOptions(), [r.meal_types[0] || "lunch"], "mt", true)}
+     ${whoAteHtml(null, { title: "Для кого?", note: "Снимите тех, кому будет другое блюдо" })}
      <button class="big-btn primary block" id="go">🗓 Добавить в меню</button>`,
     (root) => {
       $("#go", root).onclick = () =>
         guard(async () => {
           const [date] = chipValues(root, "day");
           const [meal_type] = chipValues(root, "mt");
-          await api("/plan", { method: "PUT", body: { date, meal_type, recipe_id: r.id } });
+          const eaters = whoAteValue(root, "Отметьте, для кого это блюдо");
+          await api("/plan", { method: "PUT", body: { date, meal_type, recipe_id: r.id, eaters } });
           haptic();
           closeSheet();
           toast(`Добавлено в меню: ${shortDay(date)}, ${mealName(meal_type).toLowerCase()}`);

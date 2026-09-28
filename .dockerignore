@@ -6,3 +6,4 @@ dist
 .env
 .dev.vars
 wrangler.local.toml
+backups

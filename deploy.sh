@@ -13,9 +13,14 @@ KIND="$1"; NAME="$2"; PORT="${3:-8080}"
 IP=143.198.120.25
 DOMAIN=more-momentov.ru
 
+# Сначала бэкап базы (на сервере и сюда). Не получился — не выкладываем.
+if [ -x ./scripts/backup-server.sh ]; then
+  ./scripts/backup-server.sh || { echo "❌ Бэкап базы не удался — деплой остановлен"; exit 1; }
+fi
+
 if [ "$KIND" = "web" ]; then
   $SSH "$SERVER" "newproject $NAME $PORT >/dev/null 2>&1 || true"
-  rsync -az --delete -e "$RSYNC_RSH" --exclude '.git' --exclude 'deploy.sh' ./ "$SERVER:/srv/projects/$NAME/app/"
+  rsync -az --delete -e "$RSYNC_RSH" --exclude '.git' --exclude 'deploy.sh' --exclude 'backups' --exclude 'data' ./ "$SERVER:/srv/projects/$NAME/app/"
   $SSH "$SERVER" "cd /srv/projects/$NAME && docker compose up -d --build"
   echo "OK -> https://$NAME.$DOMAIN"
 elif [ "$KIND" = "worker" ]; then

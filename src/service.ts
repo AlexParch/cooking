@@ -1,6 +1,6 @@
 // Общая логика для бота, WebApp и напоминаний.
 import { generateIdea } from "./ai";
-import { Repo, type PlanItem, type Recipe, type RecipeInput, type ShoppingItem } from "./db";
+import { Repo, type Member, type PlanItem, type Recipe, type RecipeInput, type ShoppingItem } from "./db";
 import { today, type Env } from "./env";
 import { addDays, balanceSummary, computeBalance, computeFamilyBalance, MEAL_TYPE_KEYS, MEAL_TYPES, mealsOf, suggestRecipes, worstBalance, type MealType } from "./nutrition";
 import { AISLE_ORDER, buildShoppingList, matchByProducts, planWeek, prepReminders, productMatcher, type PrepReminder } from "./planner";
@@ -28,12 +28,13 @@ export async function getBalance(env: Env, days = 7, date = today(env), memberId
   return computeBalance(meals, date, days);
 }
 
-export async function getSuggestions(env: Env, mealType?: string, date = today(env), limit = 5) {
+/** `memberId` — подбор для одного человека: по его балансу, а не по семье. */
+export async function getSuggestions(env: Env, mealType?: string, date = today(env), limit = 5, memberId?: number) {
   const repo = new Repo(env.DB);
   const [recipes, meals, balance] = await Promise.all([
     repo.listRecipes(),
     repo.listMeals(addDays(date, -HISTORY_DAYS), date),
-    getBalance(env, 7, date),
+    getBalance(env, 7, date, memberId),
   ]);
   return suggestRecipes(recipes, meals, date, mealType, limit, balance);
 }
@@ -63,27 +64,30 @@ export async function fillPlan(env: Env, start: string, days: number, replace = 
   // То, что уже съели в эти дни, тоже занимает клетку меню.
   const eaten = meals
     .filter((m) => m.date >= start && !plan.some((p) => p.date === m.date && p.meal_type === m.meal_type))
-    .map((m) => ({ id: 0, date: m.date, meal_type: m.meal_type, recipe_id: m.recipe_id, title: m.title, leftovers: false }));
+    .map((m) => ({ id: 0, date: m.date, meal_type: m.meal_type, recipe_id: m.recipe_id, title: m.title, leftovers: false, eaters: m.eaters ?? null }));
   const drafts = planWeek(recipes, history, [...plan, ...eaten], start, days);
   if (drafts.length) {
     await env.DB.batch(
       drafts.map((d) =>
-        env.DB.prepare("INSERT OR IGNORE INTO plan (date, meal_type, recipe_id, title) VALUES (?, ?, ?, ?)").bind(d.date, d.meal_type, d.recipe_id, d.title),
+        env.DB.prepare("INSERT INTO plan (date, meal_type, recipe_id, title) VALUES (?, ?, ?, ?)").bind(d.date, d.meal_type, d.recipe_id, d.title),
       ),
     );
   }
   return repo.listPlan(start, end);
 }
 
-/** Предлагает одну замену для клетки меню (следующий подходящий вариант, не текущий). */
-export async function swapPlan(env: Env, date: string, mealType: string): Promise<PlanItem | null> {
+/**
+ * Предлагает одну замену для блюда меню (следующий подходящий вариант, не текущий).
+ * `id` — какое именно блюдо клетки менять, если у членов семьи разные блюда; «для кого» не меняется.
+ */
+export async function swapPlan(env: Env, date: string, mealType: string, id?: number): Promise<PlanItem | null> {
   const repo = new Repo(env.DB);
   const [recipes, history, week] = await Promise.all([
     repo.listRecipes(),
     repo.listMeals(addDays(date, -HISTORY_DAYS), addDays(date, -1)),
     repo.listPlan(addDays(date, -6), addDays(date, 6)),
   ]);
-  const current = week.find((p) => p.date === date && p.meal_type === mealType);
+  const current = week.find((p) => p.date === date && p.meal_type === mealType && (!id || p.id === id));
   const others = week.filter((p) => p !== current);
   const byId = new Map(recipes.map((r) => [r.id, r]));
   const sim = [
@@ -97,7 +101,7 @@ export async function swapPlan(env: Env, date: string, mealType: string): Promis
   const top = suggestRecipes(pool, sim, date, mealType, 4);
   if (!top.length) return null;
   const pick = top[Math.floor(Math.random() * Math.min(top.length, 3))].recipe;
-  return repo.setPlan({ date, meal_type: mealType, recipe_id: pick.id });
+  return repo.setPlan({ id: current?.id, date, meal_type: mealType, recipe_id: pick.id });
 }
 
 /** Список покупок на период меню: заменяет прошлые «плановые» некупленные позиции. */
@@ -119,7 +123,9 @@ export async function fromProducts(env: Env, products: string[]) {
 
 export interface DayBrief {
   date: string;
+  /** Все блюда на сегодня по порядку приёмов пищи (в одной клетке их может быть несколько). */
   plan: PlanItem[];
+  members: Member[];
   prepToday: PrepReminder[];
   prepTomorrow: PrepReminder[];
   missing: string[];
@@ -130,11 +136,12 @@ export interface DayBrief {
 export async function dayBrief(env: Env, date = today(env)): Promise<DayBrief> {
   const repo = new Repo(env.DB);
   const tomorrow = addDays(date, 1);
-  const [plan, recipes, balance, family] = await Promise.all([
+  const [plan, recipes, balance, family, members] = await Promise.all([
     repo.listPlan(date, tomorrow),
     repo.listRecipes(),
     getBalance(env, 7, date),
     getFamilyBalance(env, 7, date),
+    repo.listMembers(),
   ]);
   const gaps =
     family.length >= 2
@@ -150,7 +157,8 @@ export async function dayBrief(env: Env, date = today(env)): Promise<DayBrief> {
   const todayPlan = plan.filter((p) => p.date === date);
   return {
     date,
-    plan: MEAL_TYPE_KEYS.map((k) => todayPlan.find((p) => p.meal_type === k)).filter(Boolean) as PlanItem[],
+    plan: MEAL_TYPE_KEYS.flatMap((k) => todayPlan.filter((p) => p.meal_type === k)),
+    members,
     prepToday: prepReminders(todayPlan, byId, "morning"),
     prepTomorrow: prepReminders(plan.filter((p) => p.date === tomorrow), byId, "evening"),
     missing: balanceSummary(balance).missing,
