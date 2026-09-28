@@ -9,10 +9,12 @@ export interface AiEnv {
   ANTHROPIC_API_KEY?: string;
   ANTHROPIC_MODEL?: string;
   OPENAI_API_KEY?: string;
+  OPENAI_MODEL?: string;
   OPENAI_TRANSCRIBE_MODEL?: string;
 }
 
-export const aiEnabled = (env: AiEnv) => Boolean(env.ANTHROPIC_API_KEY);
+/** Рецепты, фото и идеи: Claude, а если его ключа нет — GPT по ключу OpenAI. */
+export const aiEnabled = (env: AiEnv) => Boolean(env.ANTHROPIC_API_KEY || env.OPENAI_API_KEY);
 export const voiceEnabled = (env: AiEnv) => Boolean(env.OPENAI_API_KEY || env.AI);
 
 function toBase64(buf: ArrayBuffer): string {
@@ -51,7 +53,7 @@ export async function transcribe(env: AiEnv, audio: ArrayBuffer, filename = "voi
   return (res.text ?? "").trim();
 }
 
-// ---------- Claude ----------
+// ---------- Claude / GPT ----------
 
 const RecipeSchema = z.object({
   title: z.string().describe("Короткое понятное название блюда"),
@@ -78,26 +80,69 @@ const SYSTEM = `Ты помощник мамы в семье из двух вз�
 Группы указывай только те, что реально заметны в блюде (щепотка кунжута для украшения — не повод отмечать «орехи и семена»).
 Всегда думай о подготовке заранее: сухие бобовые почти всегда надо замачивать, замороженное мясо и рыбу — размораживать.`;
 
-function client(env: AiEnv) {
-  if (!env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY не задан — ИИ-функции выключены");
-  return new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+/** Часть запроса к модели: текст или картинка. */
+type Part = string | { image: ArrayBuffer; mime: string };
+
+/** Спрашивает модель и получает ответ строго по схеме. */
+async function ask<T>(env: AiEnv, schema: z.ZodType<T>, parts: Part[]): Promise<T> {
+  if (env.ANTHROPIC_API_KEY) return askClaude(env, schema, parts);
+  if (env.OPENAI_API_KEY) return askOpenAI(env, schema, parts);
+  throw new Error("Нет ключа ИИ (ANTHROPIC_API_KEY или OPENAI_API_KEY) — ИИ-функции выключены");
 }
 
-const model = (env: AiEnv) => env.ANTHROPIC_MODEL || "claude-opus-5";
-
-async function askRecipe(env: AiEnv, content: Anthropic.MessageParam["content"]): Promise<ParsedRecipe> {
-  const response = await client(env).messages.parse({
-    model: model(env),
+async function askClaude<T>(env: AiEnv, schema: z.ZodType<T>, parts: Part[]): Promise<T> {
+  const response = await new Anthropic({ apiKey: env.ANTHROPIC_API_KEY }).messages.parse({
+    model: env.ANTHROPIC_MODEL || "claude-opus-5",
     max_tokens: 16000,
     thinking: { type: "adaptive" },
-    output_config: { effort: "low", format: zodOutputFormat(RecipeSchema) },
+    output_config: { effort: "low", format: zodOutputFormat(schema) },
     system: SYSTEM,
-    messages: [{ role: "user", content }],
+    messages: [
+      {
+        role: "user",
+        content: parts.map((p) =>
+          typeof p === "string"
+            ? { type: "text" as const, text: p }
+            : { type: "image" as const, source: { type: "base64" as const, media_type: p.mime as "image/jpeg", data: toBase64(p.image) } },
+        ),
+      },
+    ],
   });
   if (response.stop_reason === "refusal") throw new Error("Модель отказалась обработать запрос");
   if (!response.parsed_output) throw new Error("Не удалось разобрать ответ модели");
-  return response.parsed_output;
+  return response.parsed_output as T;
 }
+
+async function askOpenAI<T>(env: AiEnv, schema: z.ZodType<T>, parts: Part[]): Promise<T> {
+  const { $schema, ...jsonSchema } = z.toJSONSchema(schema);
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: env.OPENAI_MODEL || "gpt-5.4-mini",
+      reasoning_effort: "low",
+      response_format: { type: "json_schema", json_schema: { name: "answer", strict: true, schema: jsonSchema } },
+      messages: [
+        { role: "system", content: SYSTEM },
+        {
+          role: "user",
+          content: parts.map((p) =>
+            typeof p === "string"
+              ? { type: "text", text: p }
+              : { type: "image_url", image_url: { url: `data:${p.mime};base64,${toBase64(p.image)}` } },
+          ),
+        },
+      ],
+    }),
+  });
+  if (!res.ok) throw new Error(`OpenAI: ${res.status} ${(await res.text()).slice(0, 200)}`);
+  const message = ((await res.json()) as { choices?: { message?: { content?: string | null; refusal?: string | null } }[] }).choices?.[0]?.message;
+  if (message?.refusal) throw new Error("Модель отказалась обработать запрос");
+  if (!message?.content) throw new Error("Не удалось разобрать ответ модели");
+  return schema.parse(JSON.parse(message.content));
+}
+
+const askRecipe = (env: AiEnv, text: string) => ask(env, RecipeSchema, [text]);
 
 const toInput = (r: ParsedRecipe, source: string, sourceUrl?: string): RecipeInput => ({
   ...r,
@@ -154,24 +199,12 @@ export type PhotoAnalysis = z.infer<typeof PhotoSchema>;
 
 export async function analyzePhoto(env: AiEnv, image: ArrayBuffer, mime: string, caption = ""): Promise<PhotoAnalysis> {
   const media = (["image/jpeg", "image/png", "image/webp", "image/gif"].includes(mime) ? mime : "image/jpeg") as "image/jpeg";
-  const response = await client(env).messages.parse({
-    model: model(env),
-    max_tokens: 16000,
-    thinking: { type: "adaptive" },
-    output_config: { effort: "low", format: zodOutputFormat(PhotoSchema) },
-    system: SYSTEM,
-    messages: [
-      {
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: media, data: toBase64(image) } },
-          { type: "text", text: `Что на фото? ${caption ? `Подпись: «${caption}».` : ""}` },
-        ],
-      },
-    ],
-  });
-  if (response.stop_reason === "refusal" || !response.parsed_output) throw new Error("Не получилось разобрать фото");
-  return response.parsed_output;
+  try {
+    return await ask(env, PhotoSchema, [{ image, mime: media }, `Что на фото? ${caption ? `Подпись: «${caption}».` : ""}`]);
+  } catch (e) {
+    console.error("разбор фото", e);
+    throw new Error("Не получилось разобрать фото");
+  }
 }
 
 // ---------- ссылки ----------

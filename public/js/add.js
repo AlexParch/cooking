@@ -5,7 +5,7 @@ import { mountRecorder } from "./voice.js";
 
 const needAi = () => {
   if (state.config.ai) return true;
-  toast("Эта функция заработает, когда подключат ключ Claude API", 4000);
+  toast("Эта функция заработает, когда подключат ключ ИИ", 4000);
   return false;
 };
 

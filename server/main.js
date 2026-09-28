@@ -75,6 +75,7 @@ const env = {
   ALLOWED_USER_IDS: process.env.ALLOWED_USER_IDS || "",
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || undefined,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY || undefined,
+  OPENAI_MODEL: process.env.OPENAI_MODEL || undefined,
   OPENAI_TRANSCRIBE_MODEL: process.env.OPENAI_TRANSCRIBE_MODEL || undefined,
   TELEGRAM_API_BASE: process.env.TELEGRAM_API_BASE || undefined,
   DEV_AUTH: process.env.DEV_AUTH || undefined,

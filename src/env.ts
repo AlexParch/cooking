@@ -9,6 +9,7 @@ export interface Env {
   ALLOWED_USER_IDS: string;
   ANTHROPIC_API_KEY?: string;
   OPENAI_API_KEY?: string;
+  OPENAI_MODEL?: string;
   OPENAI_TRANSCRIBE_MODEL?: string;
   DEV_AUTH?: string;
   TELEGRAM_API_BASE?: string;

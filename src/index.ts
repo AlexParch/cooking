@@ -96,7 +96,7 @@ async function authUser(request: Request, env: Env): Promise<{ id: number; first
 
 const isDate = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
 const needAi = (env: Env) => {
-  if (!aiEnabled(env)) throw new HttpError(400, "ИИ не подключён (нет ANTHROPIC_API_KEY)");
+  if (!aiEnabled(env)) throw new HttpError(400, "ИИ не подключён (нет ANTHROPIC_API_KEY или OPENAI_API_KEY)");
 };
 
 async function fileFromForm(request: Request, field: string, maxMb: number): Promise<File> {

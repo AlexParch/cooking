@@ -30,6 +30,7 @@ const lines = {
   OPENAI_API_KEY: e.OPENAI_API_KEY || "",
   TZ: e.TZ || "Europe/Moscow",
   ANTHROPIC_MODEL: e.ANTHROPIC_MODEL || "claude-opus-5",
+  OPENAI_MODEL: e.OPENAI_MODEL || "",
   // Прокси для запросов к OpenAI/Anthropic/Telegram (нужен, если сервер в России).
   HTTPS_PROXY: e.HTTPS_PROXY || "",
   NODE_USE_ENV_PROXY: e.HTTPS_PROXY ? "1" : "",

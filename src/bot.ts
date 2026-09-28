@@ -321,7 +321,7 @@ async function handleVoice(ctx: Ctx, fileId: string, filename: string, mime: str
 
 async function handlePhoto(ctx: Ctx, fileId: string, mime: string, caption: string) {
   const { env, tg, chatId, repo } = ctx;
-  if (!aiEnabled(env)) return void (await tg.send(chatId, "Чтобы разбирать фото, нужен ключ Claude API (ANTHROPIC_API_KEY)."));
+  if (!aiEnabled(env)) return void (await tg.send(chatId, "Чтобы разбирать фото, нужен ключ ИИ (ANTHROPIC_API_KEY или OPENAI_API_KEY)."));
   const progress = await tg.send(chatId, "📷 Смотрю фото…");
   try {
     const result = await analyzePhoto(env, await tg.downloadFile(fileId), mime, caption);
@@ -357,7 +357,7 @@ async function handlePhoto(ctx: Ctx, fileId: string, mime: string, caption: stri
 
 async function handleLink(ctx: Ctx, url: string) {
   const { env, tg, chatId } = ctx;
-  if (!aiEnabled(env)) return void (await tg.send(chatId, "Чтобы разбирать ссылки, нужен ключ Claude API (ANTHROPIC_API_KEY)."));
+  if (!aiEnabled(env)) return void (await tg.send(chatId, "Чтобы разбирать ссылки, нужен ключ ИИ (ANTHROPIC_API_KEY или OPENAI_API_KEY)."));
   const progress = await tg.send(chatId, "🔗 Открываю страницу и переписываю рецепт под ПП…");
   try {
     await saveAndReply(ctx, await importFromUrl(env, url), progress.message_id);
@@ -475,7 +475,7 @@ async function sendBalance(ctx: Ctx) {
 async function sendIdea(ctx: Ctx, mealType?: string, wish?: string, products?: string[]) {
   const { env, tg, chatId, repo } = ctx;
   if (!aiEnabled(env)) {
-    await tg.send(chatId, "Для идей нужен ключ Claude API (ANTHROPIC_API_KEY). Пока могу подсказать из ваших рецептов: /menu");
+    await tg.send(chatId, "Для идей нужен ключ ИИ (ANTHROPIC_API_KEY или OPENAI_API_KEY). Пока могу подсказать из ваших рецептов: /menu");
     return;
   }
   const progress = await tg.send(chatId, "✨ Думаю, что приготовить…");
